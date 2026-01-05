@@ -343,74 +343,66 @@ class BaseServiceSelect(Select):
             min_values=1,
             max_values=1
         )
-       async def callback(self, interaction: discord.Interaction):
-       guild = interaction.guild
-       user = interaction.user
-       choice = self.values[0]
 
-        category = discord.utils.get(guild.categories, name=TICKET_CATEGORY_NAME)
-        if not category:
-            category = await guild.create_category(TICKET_CATEGORY_NAME)
+        async def callback(self, interaction: discord.Interaction):
+    guild = interaction.guild
+    user = interaction.user
+    choice = self.values[0]
 
-        if choice == "halloween":
-            channel_name = f"ticket-halloween🎃{user.name}".lower()
-            title = "🎃 Halloween Base Ticket"
-            color = discord.Color.orange()
-        else:
-            channel_name = f"ticket-aqua🌊{user.name}".lower()
-            title = "🌊 Aqua Base Ticket"
-            color = discord.Color.blue()
+    # Get or create ticket category
+    category = discord.utils.get(guild.categories, name=TICKET_CATEGORY_NAME)
+    if not category:
+        category = await guild.create_category(TICKET_CATEGORY_NAME)
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True)
-        }
+    # Decide ticket type
+    if choice == "halloween":
+        channel_name = f"ticket-halloween🎃{user.name}".lower()
+        title = "🎃 Halloween Base Ticket"
+        color = discord.Color.orange()
+    else:
+        channel_name = f"ticket-aqua🌊{user.name}".lower()
+        title = "🌊 Aqua Base Ticket"
+        color = discord.Color.blue()
 
-        channel = await guild.create_text_channel(
-            channel_name,
-            category=category,
-            overwrites=overwrites
-        )
+    # Channel permissions
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        user: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True
+        ),
+        guild.me: discord.PermissionOverwrite(view_channel=True)
+    }
 
-        embed = discord.Embed(
-            title=title,
-            description=f"Welcome {user.mention}!\nA provider will assist you shortly 💬",
-            color=color
-        )
+    # Create ticket channel
+    channel = await guild.create_text_channel(
+        channel_name,
+        category=category,
+        overwrites=overwrites
+    )
 
-        role = interaction.guild.get_role(BASE_PROVIDER_ROLE_ID)
+    # Ticket embed
+    embed = discord.Embed(
+        title=title,
+        description=f"Welcome {user.mention}!\nA provider will assist you shortly 💬",
+        color=color
+    )
 
-        await channel.send(
-            content=role.mention if role else "⚠️ Role not found",
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions(roles=True)
-        )
+    # Ping provider role
+    role = guild.get_role(BASE_PROVIDER_ROLE_ID)
 
-        await interaction.response.send_message(
-            f"✅ Ticket created: {channel.mention}",
-            ephemeral=True
-            )
-    
+    await channel.send(
+        content=role.mention if role else "⚠️ Role not found",
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(roles=True)
+    )
 
-        embed = discord.Embed(
-            title=title,
-            description=f"Welcome {user.mention}!\nA provider will assist you shortly 💬",
-            color=color
-        )
-
-        role = interaction.guild.get_role(BASE_PROVIDER_ROLE_ID)
-
-await channel.send(
-    content=role.mention if role else "⚠️ Role not found",
-    embed=embed,
-    allowed_mentions=discord.AllowedMentions(roles=True)
- )
-        
-        await interaction.response.send_message(
-            f"✅ Ticket created: {channel.mention}",
-            ephemeral=True
-        )
+    # Confirmation to user
+    await interaction.response.send_message(
+        f"✅ Ticket created: {channel.mention}",
+        ephemeral=True
+    )
 
 
 class BasePanelView(View):
