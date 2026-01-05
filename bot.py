@@ -27,7 +27,6 @@ def keep_alive():
 # Bot Configuration
 PREFIX = '$'
 TICKET_CATEGORY = 'Tickets'
-TICKET_CATEGORY_NAME = "Base Tickets"
 LOG_CHANNEL = 'ticket-logs'
 
 # Bot Setup
