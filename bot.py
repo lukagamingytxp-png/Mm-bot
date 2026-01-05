@@ -313,7 +313,7 @@ class CloseTicketView(View):
         await close_ticket(interaction.channel, interaction.user)
 
 
-===================== CONFIG
+# ===================== 
 TICKET_CATEGORY_NAME = "Base Tickets"
 
 HALLOWEEN_ROLE_ID = 1457797160564298031
