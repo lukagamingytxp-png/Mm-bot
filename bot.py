@@ -26,7 +26,8 @@ def keep_alive():
 
 # Bot Configuration
 PREFIX = '$'
-TICKET_CATEGORY = 'Tickets'
+TICKET_CATEGORY_NAME = 'Tickets'
+TICKET_CATEGORY_NAME = "Base Tickets"
 LOG_CHANNEL = 'ticket-logs'
 
 # Bot Setup
@@ -402,27 +403,6 @@ class BasePanelView(View):
         super().__init__(timeout=None)
         self.add_item(BaseServiceSelect())
 # =================================================
-
-class CloseTicketView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="Close Ticket",
-        style=discord.ButtonStyle.danger,
-        emoji="🔒",
-        custom_id="close_ticket_button"
-    )
-    async def close_ticket(self, interaction: discord.Interaction, button: Button):
-        channel = interaction.channel
-
-        await interaction.response.send_message(
-            "🔒 Closing ticket...",
-            ephemeral=True
-        )
-
-        await channel.delete()
-
 # ===================== COMMAND ====================
 @bot.command(name="basepanel")
 @commands.has_permissions(administrator=True)
@@ -436,7 +416,7 @@ async def basepanel(ctx):
         ),
         color=discord.Color.purple()
     )
-    await channel.send(view=CloseTicketView())
+    
     await ctx.send(embed=embed, view=BasePanelView())
 
 
@@ -445,7 +425,7 @@ async def basepanel(ctx):
 async def on_ready():
     print(f'✅ Bot is online as {bot.user}')
     print(f'📊 Serving {len(bot.guilds)} servers')
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name='$help | Ticket System'))
+    await bot.change_presence(activity=discord.Activity(type=discord.ActityType.watching, name='$help | Ticket System'))
 
     # Add persistent views
     bot.add_view(TicketButtons())
@@ -1521,9 +1501,9 @@ async def new_ticket(ctx, ticket_type: str = None):
 # Close Command
 @bot.command(name='close')
 async def close_command(ctx):
-    if not ctx.channel.name.startswith('ticket-'):
-        await ctx.reply('❌ This command can only be used in ticket channels!')
-        return
+    if not ctx.channel.category or ctx.channel.category.name != TICKET_CATEGORY_NAME:
+    await ctx.reply('❌ This command can only be used in ticket channels!')
+    return
 
     embed = discord.Embed(
         title='⚠️ Close Ticket',
