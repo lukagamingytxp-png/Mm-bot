@@ -343,7 +343,6 @@ class BaseServiceSelect(Select):
             options=options,
             min_values=1,
             max_values=1
-            custom_id="base_service_select"
         )
 
     async def callback(self, interaction: discord.Interaction):
