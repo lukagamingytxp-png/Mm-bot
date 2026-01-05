@@ -26,7 +26,7 @@ def keep_alive():
 
 # Bot Configuration
 PREFIX = '$'
-TICKET_CATEGORY_NAME = 'Tickets'
+TICKET_CATEGORY = 'Tickets'
 TICKET_CATEGORY_NAME = "Base Tickets"
 LOG_CHANNEL = 'ticket-logs'
 
@@ -359,12 +359,12 @@ class BaseServiceSelect(Select):
         # Decide role & naming
         if choice == "halloween":
             role = discord.utils.get(guild.roles, name=HALLOWEEN_ROLE_ID)
-            channel_name = f"🎃-halloween-{user.name}".lower()
+            channel_name = f"ticket-{user.name}-halloween".lower()
             title = "🎃 Halloween Base Ticket"
             color = discord.Color.orange()
         else:
             role = discord.utils.get(guild.roles, name=AQUA_ROLE_ID)
-            channel_name = f"🌊-aqua-{user.name}".lower()
+            channel_name = f"ticket-{user.name}-aqua".lower()
             title = "🌊 Aqua Base Ticket"
             color = discord.Color.blue()
 
@@ -1501,7 +1501,7 @@ async def new_ticket(ctx, ticket_type: str = None):
 # Close Command
 @bot.command(name='close')
 async def close_command(ctx):
-    if not ctx.channel.category or ctx.channel.category.name != TICKET_CATEGORY_NAME:
+    if not ctx.channel.name.startswith('ticket-'):
     await ctx.reply('❌ This command can only be used in ticket channels!')
     return
 
