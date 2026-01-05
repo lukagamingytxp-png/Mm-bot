@@ -363,7 +363,7 @@ class BaseServiceSelect(Select):
             color = discord.Color.orange()
         else:
             role = discord.utils.get(guild.roles, name=AQUA_ROLE_ID)
-            channel_name = f"ticket-aqua"🌊{user.name}".lower()
+            channel_name = f"ticket-aqua🌊{user.name}".lower()
             title = "🌊 Aqua Base Ticket"
             color = discord.Color.blue()
 
