@@ -316,8 +316,7 @@ class CloseTicketView(View):
 # ===================== 
 TICKET_CATEGORY_NAME = "Base Tickets"
 
-HALLOWEEN_ROLE_ID = 1457797160564298031
-AQUA_ROLE_ID = 1457797160564298031
+BASE_PROVIDER_ROLE_ID = 1457797160564298031
 # =================================================
 
 # ===================== DROPDOWN ===================
@@ -357,12 +356,12 @@ class BaseServiceSelect(Select):
 
         # Decide role & naming
         if choice == "halloween":
-            role = discord.utils.get(guild.roles, name=HALLOWEEN_ROLE_ID)
+            role = discord.utils.get(guild.roles, name=BASE_PROVIDER_ROLE_ID)
             channel_name = f"ticket-halloween🎃{user.name}".lower()
             title = "🎃 Halloween Base Ticket"
             color = discord.Color.orange()
         else:
-            role = discord.utils.get(guild.roles, name=AQUA_ROLE_ID)
+            role = discord.utils.get(guild.roles, name=BASE_PROVIDER_ROLE_ID)
             channel_name = f"ticket-aqua🌊{user.name}".lower()
             title = "🌊 Aqua Base Ticket"
             color = discord.Color.blue()
@@ -385,11 +384,13 @@ class BaseServiceSelect(Select):
             color=color
         )
 
-        await channel.send(
+        role = interaction.guild.get_role(BASE_PROVIDER_ROLE_ID)
+
+await channel.send(
     content=role.mention if role else "⚠️ Role not found",
     embed=embed,
     allowed_mentions=discord.AllowedMentions(roles=True)
-        )
+ )
         
         await interaction.response.send_message(
             f"✅ Ticket created: {channel.mention}",
