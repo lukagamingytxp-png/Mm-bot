@@ -35,6 +35,11 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
+# ===== CONSTANTS =====
+TICKET_CATEGORY_NAME = "Base Tickets"
+BASE_PROVIDER_ROLE_ID = 1457797160564298031
+# =====================
+
 # Storage
 active_tickets = {}
 claimed_tickets = {}
@@ -311,7 +316,64 @@ class CloseTicketView(View):
     async def close_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer()
         await close_ticket(interaction.channel, interaction.user)
-        
+
+# ===================== DROPDOWN =====================
+class BaseServiceSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="Halloween Base",
+                description="🎃 Open a Halloween base service ticket",
+                emoji="🎃",
+                value="halloween"
+            ),
+            discord.SelectOption(
+                label="Aqua Base",
+                description="🌊 Open an Aqua base service ticket",
+                emoji="🌊",
+                value="aqua"
+            )
+        ]
+
+        super().__init__(
+            placeholder="Choose a base service…",
+            options=options,
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        # TEMP CONFIRMATION (no ticket logic yet)
+        await interaction.response.send_message(
+            "✅ Dropdown works (ticket logic comes next)",
+            ephemeral=True
+        )
+
+
+class BasePanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(BaseServiceSelect())
+# ====================================================
+
+
+# ===================== COMMAND ======================
+@bot.command(name="basepanel")
+@commands.has_permissions(administrator=True)
+async def basepanel(ctx):
+    embed = discord.Embed(
+        title="🛠️ Base Services Panel",
+        description=(
+            "Select the base service you need:\n\n"
+            "🎃 **Halloween Base Service**\n"
+            "🌊 **Aqua Base Service**"
+        ),
+        color=discord.Color.purple()
+    )
+
+    await ctx.send(embed=embed, view=BasePanelView())
+# ====================================================
+
 # Events
 @bot.event
 async def on_ready():
