@@ -40,6 +40,20 @@ TICKET_CATEGORY_NAME = "Base Tickets"
 BASE_PROVIDER_ROLE_ID = 1457797160564298031
 # =====================
 
+def initialize_json_files():
+    if not os.path.exists('bot_data.json'):
+        with open('bot_data.json', 'w') as f:
+            json.dump({'ticket_roles': {}, 'active_tickets': {}, 'claimed_tickets': {}}, f, indent=4)
+        print('✅ Created bot_data.json')
+    
+    if not os.path.exists('giveaways.json'):
+        with open('giveaways.json', 'w') as f:
+            json.dump({}, f, indent=4)
+        print('✅ Created giveaways.json')
+
+# Call before bot.run()
+initialize_json_files()
+
 # Storage
 active_tickets = {}
 claimed_tickets = {}
