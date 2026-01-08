@@ -442,33 +442,160 @@ async def on_ready():
 # Load saved data
     load_data()
 
-# Help Command
+# Replace your existing help command with these two commands:
+
+# Regular Help Command - Shows all public commands
 @bot.command(name='help')
 async def help_command(ctx):
     embed = discord.Embed(
-        title='🎫 Ticket System - Help',
-        description='Professional ticket management system for your server',
+        title='🎫 Discord Bot - Command List',
+        description='Professional ticket management system with additional features',
         color=COLORS['info']
     )
+    
+    # Ticket Commands
     embed.add_field(
         name='📋 Ticket Commands',
-        value='```\n$new <type> - Create a new ticket\n$close - Close current ticket\n$claim - Claim a ticket\n$unclaim - Unclaim a ticket\n$add <user> - Add user to ticket\n$remove <user> - Remove user from ticket\n$rename <n> - Rename ticket channel```',
+        value='```\n'
+        '$new <type> - Create a new ticket\n'
+        '$close - Close current ticket\n'
+        '$claim - Claim a ticket\n'
+        '$unclaim - Unclaim a ticket\n'
+        '$add <user> - Add user to ticket\n'
+        '$remove <user> - Remove user from ticket\n'
+        '$rename <name> - Rename ticket channel\n'
+        '$proof - Submit MM trade proof```',
         inline=False
     )
+    
+    # Setup Commands (Admin)
+    embed.add_field(
+        name='⚙️ Setup Commands (Admin)',
+        value='```\n'
+        '$setup - Create ticket panel\n'
+        '$basepanel - Create base services panel\n'
+        '$ticketrole <type> <role> - Set ticket ping role\n'
+        '$mmrole <tier> <role> - Set MM tier role\n'
+        '$ticketroles - View ticket role settings\n'
+        '$mmroles - View MM tier role settings\n'
+        '$stats - View ticket statistics```',
+        inline=False
+    )
+    
+    # Giveaway Commands
+    embed.add_field(
+        name='🎉 Giveaway Commands (Admin)',
+        value='```\n'
+        '$gcreate <min> <winners> [img] <prize>\n'
+        '$gend <message_id> - End giveaway early\n'
+        '$greroll <message_id> - Reroll winner\n'
+        '$glist - List active giveaways\n'
+        '$gdelete <message_id> - Cancel giveaway```',
+        inline=False
+    )
+    
+    # Fun Commands
+    embed.add_field(
+        name='🎮 Fun Commands',
+        value='```\n'
+        '$gambleflip <user1> <user2> <flips>\n'
+        '$remindme <time> <unit> <reminder>\n'
+        '$snipe - See last deleted message```',
+        inline=False
+    )
+    
+    # Ticket Types
     embed.add_field(
         name='🏷️ Ticket Types',
-        value='```\npartnership - Partnership inquiries\nmiddleman - Middleman services\nsupport - General support```',
+        value='```\n'
+        'partnership - Partnership inquiries\n'
+        'middleman - Middleman services\n'
+        'support - General support```',
         inline=False
     )
-    embed.add_field(
-        name='⚙️ Setup Commands',
-        value='```\n.setup - Create ticket panel\n.stats - View ticket statistics```',
-        inline=False
-    )
+    
     embed.set_footer(text=f'Requested by {ctx.author}', icon_url=ctx.author.display_avatar.url)
-    embed.timestamp = datetime.utcnow()
 
     await ctx.reply(embed=embed)
+
+
+# Secret Help Command - Shows owner-only commands
+@bot.command(name='secrethelp', aliases=['ownerhelp', 'adminhelp'])
+async def secret_help(ctx):
+    """Shows owner-only commands"""
+    if ctx.author.id != OWNER_ID:
+        return await ctx.reply('❌ This command is only available to the bot owner!')
+    
+    embed = discord.Embed(
+        title='🔒 Owner-Only Commands',
+        description=f'Secret commands for {ctx.author.mention}',
+        color=0xFF0000
+    )
+    
+    # Troll Commands
+    embed.add_field(
+        name='😈 Troll Commands',
+        value='```\n'
+        '$nuke - Fake nuke the server\n'
+        '$ban <user> [reason] - Fake ban someone\n'
+        '$hack <user> - Fake hack someone\n'
+        '$annoy <user> [times] - Ping user multiple times\n'
+        '$ghostping <user> - Ghost ping someone\n'
+        '$raidmode - Fake raid mode activation```',
+        inline=False
+    )
+    
+    # Message Commands
+    embed.add_field(
+        name='💬 Message Commands',
+        value='```\n'
+        '$say <message> - Make bot say something\n'
+        '$embedsay <color> <message> - Say in embed\n'
+        '$impersonate <user> <msg> - Fake user message\n'
+        '$dm <user> <message> - DM someone anonymously\n'
+        '$spam <times> <message> - Spam messages```',
+        inline=False
+    )
+    
+    # Server Management
+    embed.add_field(
+        name='🛠️ Server Management',
+        value='```\n'
+        '$clear <amount> - Delete messages (max 100)\n'
+        '$lock - Lock current channel\n'
+        '$unlock - Unlock current channel\n'
+        '$slowmode <seconds> - Set slowmode (0-21600)\n'
+        '$nickall <nickname> - Change everyone\'s nick\n'
+        '$resetnicks - Reset all nicknames```',
+        inline=False
+    )
+    
+    # Fun Effects
+    embed.add_field(
+        name='🌈 Fun Effects',
+        value='```\n'
+        '$rainbow <role> [duration] - Rainbow role colors\n'
+        '$typing [seconds] - Fake typing indicator\n'
+        '$status <type> <text> - Change bot status\n'
+        '  Types: playing, watching, listening, streaming```',
+        inline=False
+    )
+    
+    embed.add_field(
+        name='⚠️ Important',
+        value='**Use these commands responsibly!**\nSome are just for fun and won\'t actually do harmful actions.',
+        inline=False
+    )
+    
+    embed.set_footer(text='Keep this secret! 🤫', icon_url=ctx.author.display_avatar.url)
+    
+    # Send as ephemeral (DM) to keep it private
+    try:
+        await ctx.author.send(embed=embed)
+        await ctx.message.delete()  # Delete the command message
+    except discord.Forbidden:
+        await ctx.reply(embed=embed, delete_after=30)
+        await ctx.message.delete()
 
 
 
