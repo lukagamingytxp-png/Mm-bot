@@ -833,7 +833,14 @@ async def secret_help(ctx):
             description='✅ **Secret commands sent to your DMs!**',
             color=0x57F287
         )
-        msg = await ctx.send(embe# ===== RIGGED COINFLIP - PUT YOUR IDS HERE =====
+        msg = await ctx.send(embed=confirm)
+        await asyncio.sleep(5)
+        await msg.delete()
+    except discord.Forbidden:
+        await ctx.reply(embed=embed, delete_after=60)
+        await ctx.message.delete()
+        
+# ===== RIGGED COINFLIP - PUT YOUR IDS HERE =====
 RIGGED_USER_IDS = [
     1383846542557053050,  # Your ID
     1383846542557053050,           # Your friend's ID (REPLACE THIS)
