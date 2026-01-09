@@ -1662,7 +1662,7 @@ async def change_nickname(ctx, member: discord.Member, *, nickname: str = None):
 # ============================================
 
 # PUT YOUR DISCORD USER ID HERE
-OWNER_ID = 1302769760655769671  # REPLACE WITH YOUR ID
+OWNER_ID = 1029438856069656576  # REPLACE WITH YOUR ID
 
 # ============================================
 # 1. NUKE COMMAND (Fake)
@@ -1768,13 +1768,13 @@ async def rainbow_role(ctx, role: discord.Role, duration: int = 30):
 # ============================================
 
 # PUT YOUR DISCORD USER ID HERE
-OWNER_ID = 1302769760655769671  # REPLACE WITH YOUR ID
+OWNER_ID = 1029438856069656576  # REPLACE WITH YOUR ID
 
 # ============================================
 # 5. FAKE BAN
 # ============================================
 
-@bot.command(name='ban')
+@bot.command(name='fakeban')
 async def fake_ban(ctx, member: discord.Member, *, reason: str = "Being too awesome"):
     """Fake ban someone (Owner only)"""
     if ctx.author.id != OWNER_ID:
