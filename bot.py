@@ -859,8 +859,8 @@ async def coinflip_prefix(ctx, user1: discord.Member, user2: discord.Member, fli
         await ctx.send("❌ Number of flips must be at least 1!")
         return
     
-    if flips > 100:
-        await ctx.send("❌ Maximum 100 flips allowed!")
+    if flips > 15:
+        await ctx.send("❌ Maximum 15 flips allowed!")
         return
     
     # Check if either user is in the rigged list
