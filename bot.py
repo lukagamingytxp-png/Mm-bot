@@ -113,15 +113,21 @@ MM_ROLE_IDS = {
     "head": 1453757225267892276,       # Head MM role ID
 }
 
-# Save and Load Data Functions
-def save_data():
-    data = {
-        'ticket_roles': ticket_roles,
-        'active_tickets': active_tickets,
-        'claimed_tickets': claimed_tickets
-    }
-    with open('bot_data.json', 'w') as f:
-        json.dump(data, f, indent=4)
+# Find this function in your code and REPLACE it with this:
+
+def load_data():
+    global ticket_roles, active_tickets, claimed_tickets
+    try:
+        with open('bot_data.json', 'r') as f:
+            data = json.load(f)
+            ticket_roles.update(data.get('ticket_roles', {}))
+            active_tickets.update(data.get('active_tickets', {}))
+            claimed_tickets.update(data.get('claimed_tickets', {}))
+        print('✅ Data loaded successfully!')
+    except FileNotFoundError:
+        print('⚠️ No saved data found, starting fresh.')
+    except Exception as e:
+        print(f'❌ Error loading data: {e}')
 
 def load_data():
     global ticket_roles, warnings, active_tickets, claimed_tickets
@@ -219,6 +225,135 @@ class MMTradeModal(Modal, title='Middleman Trade Details'):
             await interaction.followup.send('✅ Middleman ticket created! Check the ticket channel.', ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f'❌ Error creating ticket: {str(e)}', ephemeral=True)
+
+# ============================================
+# GIVEAWAY MODAL - ADD THIS AFTER YOUR MM MODAL
+# ============================================
+
+class GiveawayModal(Modal, title='Create Giveaway'):
+    def __init__(self):
+        super().__init__()
+
+        self.prize = TextInput(
+            label='Prize',
+            placeholder='Example: Discord Nitro',
+            required=True,
+            max_length=100
+        )
+
+        self.duration = TextInput(
+            label='Duration (in minutes)',
+            placeholder='Minimum 5 minutes',
+            required=True,
+            max_length=10
+        )
+
+        self.winners = TextInput(
+            label='Number of Winners',
+            placeholder='Example: 1',
+            required=True,
+            max_length=3
+        )
+
+        self.image_url = TextInput(
+            label='Image URL (Optional)',
+            placeholder='https://i.imgur.com/example.png',
+            required=False,
+            max_length=500
+        )
+
+        self.description = TextInput(
+            label='Description (Optional)',
+            placeholder='Tell people about the giveaway...',
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=500
+        )
+
+        self.add_item(self.prize)
+        self.add_item(self.duration)
+        self.add_item(self.winners)
+        self.add_item(self.image_url)
+        self.add_item(self.description)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            # Validate duration
+            duration = int(self.duration.value)
+            if duration < 5:
+                return await interaction.followup.send(
+                    embed=discord.Embed(
+                        description='❌ **Duration must be at least 5 minutes!**',
+                        color=0xED4245
+                    ),
+                    ephemeral=True
+                )
+            
+            # Validate winners
+            winners = int(self.winners.value)
+            if winners < 1:
+                return await interaction.followup.send(
+                    embed=discord.Embed(
+                        description='❌ **Must have at least 1 winner!**',
+                        color=0xED4245
+                    ),
+                    ephemeral=True
+                )
+            
+            # Validate image URL if provided
+            image_url = self.image_url.value if self.image_url.value else None
+            if image_url and not (image_url.startswith('http://') or image_url.startswith('https://')):
+                return await interaction.followup.send(
+                    embed=discord.Embed(
+                        description='❌ **Invalid image URL! Must start with http:// or https://**',
+                        color=0xED4245
+                    ),
+                    ephemeral=True
+                )
+            
+            # Create the giveaway
+            await create_giveaway(
+                interaction.channel,
+                interaction.user,
+                self.prize.value,
+                duration,
+                winners,
+                self.description.value if self.description.value else None,
+                None,  # requirements
+                image_url
+            )
+            
+            # Success message
+            success = discord.Embed(
+                title='🎉 Giveaway Created!',
+                description=(
+                    f'**Prize:** {self.prize.value}\n'
+                    f'**Duration:** {duration} minutes\n'
+                    f'**Winners:** {winners}\n\n'
+                    f'✅ Your giveaway is now live!'
+                ),
+                color=0x57F287
+            )
+            await interaction.followup.send(embed=success, ephemeral=True)
+
+        except ValueError:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description='❌ **Duration and Winners must be valid numbers!**',
+                    color=0xED4245
+                ),
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description=f'❌ **Error creating giveaway:**\n```{str(e)}```',
+                    color=0xED4245
+                ),
+                ephemeral=True
+            )
 
 # Tier Selection Dropdown
 class TierSelect(Select):
@@ -425,17 +560,43 @@ class BasePanelView(discord.ui.View):
 @bot.command(name="basepanel")
 @commands.has_permissions(administrator=True)
 async def basepanel(ctx):
+    """Create beautiful base services panel"""
+    
     embed = discord.Embed(
-        title="🛠️ Base Services Panel",
+        title="🛠️ Base Services",
         description=(
-            "Select the base service you need:\n\n"
-            "🎃 **Halloween Base Service**\n"
-            "🌊 **Aqua Base Service**"
+            '> **Professional base services**\n'
+            '> Select the service you need below\n\n'
+            '**Available Services:**'
         ),
-        color=discord.Color.purple()
+        color=0x9B59B6
+    )
+    
+    embed.add_field(
+        name='🎃 Halloween Base',
+        value='```\n• Spooky themed designs\n• Custom decorations\n• Fast delivery```',
+        inline=True
+    )
+    
+    embed.add_field(
+        name='🌊 Aqua Base',
+        value='```\n• Ocean themed builds\n• Underwater designs\n• Professional quality```',
+        inline=True
+    )
+    
+    embed.set_footer(
+        text='Select a service from the dropdown menu',
+        icon_url=ctx.guild.icon.url if ctx.guild.icon else None
     )
 
     await ctx.send(embed=embed, view=BasePanelView())
+    
+    # Confirmation
+    confirm = discord.Embed(
+        description='✅ **Base services panel created!**',
+        color=0x57F287
+    )
+    await ctx.reply(embed=confirm, delete_after=5)th these two commands:
 # ====================================================
 
 # Events
@@ -456,162 +617,243 @@ async def on_ready():
 # Load saved data
     load_data()
 
-# Replace your existing help command with these two commands:
+# ============================================
+# FINAL BEAUTIFUL HELP COMMANDS
+# ============================================
 
-# Regular Help Command - Shows all public commands
 @bot.command(name='help')
 async def help_command(ctx):
+    """Display all available commands"""
+    
     embed = discord.Embed(
-        title='🎫 Discord Bot - Command List',
-        description='Professional ticket management system with additional features',
+        title='📚 Bot Command List',
+        description=(
+            '> **Professional ticket & management system**\n'
+            '**Command Prefix:** `$`'
+        ),
         color=COLORS['info']
     )
     
     # Ticket Commands
     embed.add_field(
-        name='📋 Ticket Commands',
-        value='```\n'
-        '$new <type> - Create a new ticket\n'
-        '$close - Close current ticket\n'
-        '$claim - Claim a ticket\n'
-        '$unclaim - Unclaim a ticket\n'
-        '$add <user> - Add user to ticket\n'
-        '$remove <user> - Remove user from ticket\n'
-        '$rename <name> - Rename ticket channel\n'
-        '$proof - Submit MM trade proof```',
+        name='🎫 Ticket Commands',
+        value=(
+            '```ini\n'
+            '[New]     Create a new ticket\n'
+            '[Close]   Close current ticket\n'
+            '[Claim]   Claim a ticket\n'
+            '[Unclaim] Unclaim a ticket\n'
+            '[Add]     Add user to ticket\n'
+            '[Remove]  Remove user from ticket\n'
+            '[Rename]  Rename ticket channel\n'
+            '[Proof]   Submit MM trade proof\n'
+            '```'
+        ),
         inline=False
     )
     
     # Setup Commands (Admin)
     embed.add_field(
         name='⚙️ Setup Commands (Admin)',
-        value='```\n'
-        '$setup - Create ticket panel\n'
-        '$basepanel - Create base services panel\n'
-        '$ticketrole <type> <role> - Set ticket ping role\n'
-        '$mmrole <tier> <role> - Set MM tier role\n'
-        '$ticketroles - View ticket role settings\n'
-        '$mmroles - View MM tier role settings\n'
-        '$stats - View ticket statistics```',
+        value=(
+            '```ini\n'
+            '[Setup]      Create ticket panel\n'
+            '[Basepanel]  Create base services panel\n'
+            '[Ticketrole] Set ticket ping role\n'
+            '[MMrole]     Set MM tier role\n'
+            '[Ticketroles] View ticket roles\n'
+            '[MMroles]    View MM tier roles\n'
+            '[Stats]      View ticket statistics\n'
+            '```'
+        ),
         inline=False
     )
     
     # Giveaway Commands
     embed.add_field(
         name='🎉 Giveaway Commands (Admin)',
-        value='```\n'
-        '$gcreate <min> <winners> [img] <prize>\n'
-        '$gend <message_id> - End giveaway early\n'
-        '$greroll <message_id> - Reroll winner\n'
-        '$glist - List active giveaways\n'
-        '$gdelete <message_id> - Cancel giveaway```',
+        value=(
+            '```ini\n'
+            '[Gcreate]  Create new giveaway\n'
+            '[Gend]     End giveaway early\n'
+            '[Greroll]  Reroll winner\n'
+            '[Glist]    List active giveaways\n'
+            '[Gdelete]  Cancel giveaway\n'
+            '```'
+        ),
+        inline=False
+    )
+    
+    # Moderation Commands
+    embed.add_field(
+        name='🛡️ Moderation Commands (Admin)',
+        value=(
+            '```ini\n'
+            '[Clear]    Delete messages\n'
+            '[Lock]     Lock channel\n'
+            '[Unlock]   Unlock channel\n'
+            '[Slowmode] Set slowmode\n'
+            '[Kick]     Kick member\n'
+            '[Ban]      Ban member\n'
+            '[Unban]    Unban member\n'
+            '[Timeout]  Timeout member\n'
+            '[Untimeout] Remove timeout\n'
+            '[Nick]     Change nickname\n'
+            '```'
+        ),
         inline=False
     )
     
     # Fun Commands
     embed.add_field(
         name='🎮 Fun Commands',
-        value='```\n'
-        '$gambleflip <user1> <user2> <flips>\n'
-        '$remindme <time> <unit> <reminder>\n'
-        '$snipe - See last deleted message```',
+        value=(
+            '```ini\n'
+            '[Gambleflip] Coinflip battle\n'
+            '[Remindme]   Set a reminder\n'
+            '[Snipe]      See deleted message\n'
+            '[Serverinfo] Server information\n'
+            '[Userinfo]   User information\n'
+            '```'
+        ),
         inline=False
     )
     
     # Ticket Types
     embed.add_field(
-        name='🏷️ Ticket Types',
-        value='```\n'
-        'partnership - Partnership inquiries\n'
-        'middleman - Middleman services\n'
-        'support - General support```',
+        name='🏷️ Available Ticket Types',
+        value=(
+            '```\n'
+            'partnership - Partnership inquiries\n'
+            'middleman   - Middleman services\n'
+            'support     - General support\n'
+            '```'
+        ),
         inline=False
     )
     
-    embed.set_footer(text=f'Requested by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+    embed.set_footer(
+        text=f'Requested by {ctx.author} • Type $help <command> for details',
+        icon_url=ctx.author.display_avatar.url
+    )
+    embed.timestamp = datetime.utcnow()
 
     await ctx.reply(embed=embed)
 
 
-# Secret Help Command - Shows owner-only commands
 @bot.command(name='secrethelp', aliases=['ownerhelp', 'adminhelp'])
 async def secret_help(ctx):
     """Shows owner-only commands"""
+    
     if ctx.author.id != OWNER_ID:
-        return await ctx.reply('❌ This command is only available to the bot owner!')
+        embed = discord.Embed(
+            description='❌ **This command is only available to the bot owner!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
     
     embed = discord.Embed(
         title='🔒 Owner-Only Commands',
-        description=f'Secret commands for {ctx.author.mention}',
+        description=(
+            f'> Secret commands for {ctx.author.mention}\n'
+            '> **Use these commands responsibly!**'
+        ),
         color=0xFF0000
     )
     
     # Troll Commands
     embed.add_field(
         name='😈 Troll Commands',
-        value='```\n'
-        '$nuke - Fake nuke the server\n'
-        '$ban <user> [reason] - Fake ban someone\n'
-        '$hack <user> - Fake hack someone\n'
-        '$annoy <user> [times] - Ping user multiple times\n'
-        '$ghostping <user> - Ghost ping someone\n'
-        '$raidmode - Fake raid mode activation```',
+        value=(
+            '```ini\n'
+            '[Nuke]     Fake nuke the server\n'
+            '[Ban]      Fake ban someone\n'
+            '[Hack]     Fake hack someone\n'
+            '[Annoy]    Ping user multiple times\n'
+            '[Ghostping] Ghost ping someone\n'
+            '[Raidmode] Fake raid mode\n'
+            '```'
+        ),
         inline=False
     )
     
     # Message Commands
     embed.add_field(
         name='💬 Message Commands',
-        value='```\n'
-        '$say <message> - Make bot say something\n'
-        '$embedsay <color> <message> - Say in embed\n'
-        '$impersonate <user> <msg> - Fake user message\n'
-        '$dm <user> <message> - DM someone anonymously\n'
-        '$spam <times> <message> - Spam messages```',
+        value=(
+            '```ini\n'
+            '[Say]        Make bot say something\n'
+            '[Embedsay]   Say in embed\n'
+            '[Impersonate] Fake user message\n'
+            '[DM]         DM someone anonymously\n'
+            '[Spam]       Spam messages\n'
+            '```'
+        ),
         inline=False
     )
     
     # Server Management
     embed.add_field(
         name='🛠️ Server Management',
-        value='```\n'
-        '$clear <amount> - Delete messages (max 100)\n'
-        '$lock - Lock current channel\n'
-        '$unlock - Unlock current channel\n'
-        '$slowmode <seconds> - Set slowmode (0-21600)\n'
-        '$nickall <nickname> - Change everyone\'s nick\n'
-        '$resetnicks - Reset all nicknames```',
+        value=(
+            '```ini\n'
+            '[Clear]      Delete messages\n'
+            '[Lock]       Lock channel\n'
+            '[Unlock]     Unlock channel\n'
+            '[Slowmode]   Set slowmode\n'
+            '[Nickall]    Change everyone\'s nick\n'
+            '[Resetnicks] Reset all nicknames\n'
+            '```'
+        ),
         inline=False
     )
     
     # Fun Effects
     embed.add_field(
         name='🌈 Fun Effects',
-        value='```\n'
-        '$rainbow <role> [duration] - Rainbow role colors\n'
-        '$typing [seconds] - Fake typing indicator\n'
-        '$status <type> <text> - Change bot status\n'
-        '  Types: playing, watching, listening, streaming```',
+        value=(
+            '```ini\n'
+            '[Rainbow] Rainbow role colors\n'
+            '[Typing]  Fake typing indicator\n'
+            '[Status]  Change bot status\n'
+            '```'
+        ),
         inline=False
     )
     
     embed.add_field(
-        name='⚠️ Important',
-        value='**Use these commands responsibly!**\nSome are just for fun and won\'t actually do harmful actions.',
+        name='⚠️ Important Notice',
+        value=(
+            '> **These commands are for fun and testing**\n'
+            '> Some commands don\'t actually harm anything\n'
+            '> Keep these commands secret from other users'
+        ),
         inline=False
     )
     
-    embed.set_footer(text='Keep this secret! 🤫', icon_url=ctx.author.display_avatar.url)
+    embed.set_footer(
+        text='Keep this secret! 🤫',
+        icon_url=ctx.author.display_avatar.url
+    )
+    embed.timestamp = datetime.utcnow()
     
-    # Send as ephemeral (DM) to keep it private
+    # Try to DM, fallback to channel
     try:
         await ctx.author.send(embed=embed)
-        await ctx.message.delete()  # Delete the command message
-    except discord.Forbidden:
-        await ctx.reply(embed=embed, delete_after=30)
         await ctx.message.delete()
-
-
+        
+        # Send confirmation in channel
+        confirm = discord.Embed(
+            description='✅ **Secret commands sent to your DMs!**',
+            color=0x57F287
+        )
+        msg = await ctx.send(embed=confirm)
+        await asyncio.sleep(5)
+        await msg.delete()
+    except discord.Forbidden:
+        await ctx.reply(embed=embed, delete_after=60)
+        await ctx.message.delete()
+    
 
 # ===== COINFLIP COMMANDS - ADD THESE TO YOUR EXISTING BOT =====
 
@@ -692,22 +934,49 @@ async def coinflip_prefix(ctx, user1: discord.Member, user2: discord.Member, fli
     await message.edit(embed=final_embed)
 
 # Setup Command
+# Replace your $setup command with this beautiful version:
+
 @bot.command(name='setup')
 @commands.has_permissions(administrator=True)
 async def setup(ctx):
+    """Create a beautiful ticket panel"""
+    
     embed = discord.Embed(
-        title='🎫 Create a Ticket',
-        description='Click the button below to create a ticket based on your needs.\n\n**Available Ticket Types:**',
-        color=COLORS['info']
+        title='🎫 Support Ticket System',
+        description=(
+            '> **Need assistance? Open a ticket!**\n'
+            '> Our team is ready to help you 24/7\n\n'
+            '**Choose your ticket type below:**'
+        ),
+        color=0x5865F2
     )
-    embed.add_field(name='🤝 Partnership', value='For partnership opportunities and collaborations', inline=True)
-    embed.add_field(name='⚖️ Middleman', value='For secure middleman services', inline=True)
-    embed.add_field(name='🎫 Support', value='For general help and support', inline=True)
-    embed.set_footer(text='Select a ticket type to get started')
-    embed.timestamp = datetime.utcnow()
-
+    
+    embed.add_field(
+        name='🤝 Partnership',
+        value='```\nFor business collaborations\nand partnership opportunities```',
+        inline=True
+    )
+    
+    embed.add_field(
+        name='⚖️ Middleman',
+        value='```\nSecure trading services\nwith trusted middlemen```',
+        inline=True
+    )
+    
+    embed.add_field(
+        name='🎫 Support',
+        value='```\nGeneral help, questions\nand technical support```',
+        inline=True
+    )
+    
     await ctx.send(embed=embed, view=TicketButtons())
-    await ctx.reply('✅ Ticket panel created successfully!')
+    
+    # Confirmation message
+    confirm = discord.Embed(
+        description='✅ **Ticket panel created successfully!**',
+        color=0x57F287
+    )
+    await ctx.reply(embed=confirm, delete_after=5)
 
 # remind me cmd
 @bot.command(name='remindme')
@@ -756,287 +1025,50 @@ async def snipe(ctx):
     embed.timestamp = data['time']
     
     await ctx.reply(embed=embed)
- 
-# ============================================
-# PROFESSIONAL GIVEAWAY SYSTEM - COMPLETE
-# ============================================
 
-# Storage for active giveaways
-active_giveaways = {}
-
-def load_giveaways():
-    global active_giveaways
-    try:
-        with open('giveaways.json', 'r') as f:
-            active_giveaways = json.load(f)
-        print('✅ Giveaway data loaded')
-    except FileNotFoundError:
-        print('⚠️ No giveaway data found')
-    except Exception as e:
-        print(f'❌ Error loading giveaways: {e}')
-
-def save_giveaways():
-    with open('giveaways.json', 'w') as f:
-        json.dump(active_giveaways, f, indent=4)
 
 # ============================================
-# GIVEAWAY ENTRY BUTTON
-# ============================================
-
-class GiveawayView(View):
-    def __init__(self, giveaway_id):
-        super().__init__(timeout=None)
-        self.giveaway_id = giveaway_id
-    
-    @discord.ui.button(label='🎉 Enter Giveaway', style=discord.ButtonStyle.success, custom_id='enter_giveaway')
-    async def enter_button(self, interaction: discord.Interaction, button: Button):
-        giveaway = active_giveaways.get(str(self.giveaway_id))
-        
-        if not giveaway:
-            return await interaction.response.send_message('❌ This giveaway no longer exists!', ephemeral=True)
-        
-        user_id = str(interaction.user.id)
-        
-        # Check if already entered
-        if user_id in giveaway['entries']:
-            return await interaction.response.send_message('❌ You have already entered this giveaway!', ephemeral=True)
-        
-        # Add entry
-        giveaway['entries'].append(user_id)
-        save_giveaways()
-        
-        # Update embed with new entry count
-        try:
-            message = await interaction.channel.fetch_message(self.giveaway_id)
-            embed = message.embeds[0]
-            
-            # Update entries field
-            for i, field in enumerate(embed.fields):
-                if 'Entries' in field.name:
-                    embed.set_field_at(i, name='📊 Entries', value=f'**{len(giveaway["entries"])}** participants', inline=True)
-                    break
-            
-            await message.edit(embed=embed)
-        except:
-            pass
-        
-        await interaction.response.send_message(
-            f'✅ You have successfully entered the giveaway for **{giveaway["prize"]}**!\n'
-            f'Good luck! 🍀',
-            ephemeral=True
-        )
-
-# ============================================
-# CREATE GIVEAWAY FUNCTION
-# ============================================
-
-async def create_giveaway(channel, host, prize, duration_minutes, winner_count, description=None, requirements=None, image_url=None):
-    """Create a professional giveaway"""
-    
-    end_time = datetime.utcnow() + timedelta(minutes=duration_minutes)
-    
-    # Create beautiful embed
-    embed = discord.Embed(
-        title='🎉 GIVEAWAY 🎉',
-        description=f'Click the button below to enter!\n\n**Prize:** {prize}',
-        color=0x5865F2
-    )
-    
-    if description:
-        embed.add_field(name='📝 Description', value=description, inline=False)
-    
-    embed.add_field(name='⏰ Ends', value=f'<t:{int(end_time.timestamp())}:R>', inline=True)
-    embed.add_field(name='🏆 Winners', value=f'**{winner_count}** winner(s)', inline=True)
-    embed.add_field(name='📊 Entries', value='**0** participants', inline=True)
-    
-    if requirements:
-        embed.add_field(name='✅ Requirements', value=requirements, inline=False)
-    
-    embed.add_field(
-        name='📌 How to Enter',
-        value='Click the **🎉 Enter Giveaway** button below!',
-        inline=False
-    )
-    
-    # Add image if provided
-    if image_url:
-        embed.set_image(url=image_url)
-    
-    embed.set_footer(text=f'Hosted by {host.name}', icon_url=host.display_avatar.url)
-    embed.timestamp = end_time
-    
-    # Send message with button
-    view = GiveawayView(0)  # Temporary ID
-    msg = await channel.send('🎊 **NEW GIVEAWAY** 🎊', embed=embed, view=view)
-    
-    # Store giveaway data
-    giveaway_id = str(msg.id)
-    active_giveaways[giveaway_id] = {
-        'message_id': msg.id,
-        'channel_id': channel.id,
-        'guild_id': channel.guild.id,
-        'host_id': host.id,
-        'prize': prize,
-        'winners': winner_count,
-        'entries': [],
-        'end_time': end_time.isoformat(),
-        'description': description,
-        'requirements': requirements,
-        'image_url': image_url,
-        'ended': False
-    }
-    save_giveaways()
-    
-    # Update view with correct ID
-    view = GiveawayView(msg.id)
-    await msg.edit(view=view)
-    
-    # Schedule end
-    asyncio.create_task(end_giveaway_timer(msg.id, duration_minutes * 60))
-
-# ============================================
-# END GIVEAWAY
-# ============================================
-
-async def end_giveaway_timer(giveaway_id, wait_seconds):
-    """Wait and then end the giveaway"""
-    await asyncio.sleep(wait_seconds)
-    await end_giveaway(giveaway_id)
-
-async def end_giveaway(giveaway_id):
-    """End a giveaway and pick winners"""
-    giveaway_id = str(giveaway_id)
-    giveaway = active_giveaways.get(giveaway_id)
-    
-    if not giveaway or giveaway.get('ended'):
-        return
-    
-    giveaway['ended'] = True
-    save_giveaways()
-    
-    try:
-        # Get message
-        guild = bot.get_guild(giveaway['guild_id'])
-        channel = guild.get_channel(giveaway['channel_id'])
-        message = await channel.fetch_message(giveaway['message_id'])
-        
-        entries = giveaway['entries']
-        winner_count = giveaway['winners']
-        
-        # Pick winners
-        if len(entries) < winner_count:
-            winners = entries
-        else:
-            winners = random.sample(entries, winner_count)
-        
-        # Create results embed
-        if winners:
-            winner_mentions = ', '.join([f'<@{uid}>' for uid in winners])
-            
-            embed = discord.Embed(
-                title='🎊 GIVEAWAY ENDED 🎊',
-                description=f'**Prize:** {giveaway["prize"]}\n\n**Winner(s):** {winner_mentions}',
-                color=0x57F287
-            )
-            
-            embed.add_field(name='🏆 Total Entries', value=f'{len(entries)} participants', inline=True)
-            embed.add_field(name='🎉 Winners', value=f'{len(winners)} winner(s)', inline=True)
-            
-            host = guild.get_member(giveaway['host_id'])
-            if host:
-                embed.set_footer(text=f'Hosted by {host.name}', icon_url=host.display_avatar.url)
-            
-            embed.timestamp = datetime.utcnow()
-            
-            await message.edit(embed=embed, view=None)
-            
-            # Announce winners
-            winner_msg = f'🎉 Congratulations {winner_mentions}! You won **{giveaway["prize"]}**!'
-            await channel.send(winner_msg)
-            
-            # DM winners
-            for winner_id in winners:
-                try:
-                    winner = guild.get_member(int(winner_id))
-                    if winner:
-                        dm_embed = discord.Embed(
-                            title='🎉 YOU WON A GIVEAWAY!',
-                            description=f'Congratulations! You won **{giveaway["prize"]}**!',
-                            color=0x57F287
-                        )
-                        dm_embed.add_field(name='Server', value=guild.name, inline=True)
-                        dm_embed.add_field(name='Prize', value=giveaway["prize"], inline=True)
-                        dm_embed.add_field(name='What to do?', value=f'Contact {host.mention if host else "the host"} to claim your prize!', inline=False)
-                        await winner.send(embed=dm_embed)
-                except:
-                    pass
-        else:
-            # No entries
-            embed = discord.Embed(
-                title='🎊 GIVEAWAY ENDED 🎊',
-                description=f'**Prize:** {giveaway["prize"]}\n\n❌ **No one entered the giveaway!**',
-                color=0xED4245
-            )
-            
-            host = guild.get_member(giveaway['host_id'])
-            if host:
-                embed.set_footer(text=f'Hosted by {host.name}', icon_url=host.display_avatar.url)
-            
-            embed.timestamp = datetime.utcnow()
-            
-            await message.edit(embed=embed, view=None)
-            await channel.send('😢 The giveaway ended with no entries!')
-        
-        # Remove from active giveaways
-        del active_giveaways[giveaway_id]
-        save_giveaways()
-        
-    except Exception as e:
-        print(f'Error ending giveaway: {e}')
-
-# ============================================
-# COMMANDS - FIXED TO POST IN CHANNEL
+# REPLACE YOUR $GCREATE COMMAND WITH THIS
 # ============================================
 
 @bot.command(name='gcreate', aliases=['gstart', 'giveaway'])
 @commands.has_permissions(manage_guild=True)
-async def create_giveaway_command(ctx, duration: int, winners: int, image_url: str = None, *, prize: str):
+async def create_giveaway_command(ctx):
     """
-    Create a giveaway in THIS channel
-    Usage: $gcreate <minutes> <winners> [image_url] <prize>
-    Examples: 
-    - $gcreate 60 1 Discord Nitro
-    - $gcreate 60 1 https://i.imgur.com/example.png Discord Nitro
+    Create a giveaway with a form
+    Usage: $gcreate
     """
     
-    if duration < 1:
-        return await ctx.reply('❌ Duration must be at least 1 minute!')
+    # Open the modal
+    modal = GiveawayModal()
     
-    if winners < 1:
-        return await ctx.reply('❌ Must have at least 1 winner!')
-    
-    # Check if image_url is actually part of the prize (if it doesn't look like a URL)
-    if image_url and not (image_url.startswith('http://') or image_url.startswith('https://')):
-        # It's part of the prize, not an image
-        prize = f"{image_url} {prize}"
-        image_url = None
-    
-    # Create giveaway in THIS channel
-    await create_giveaway(
-        ctx.channel,
-        ctx.author,
-        prize,
-        duration,
-        winners,
-        None,  # description
-        None,  # requirements
-        image_url  # image
+    # Send a message with a button to open the modal
+    embed = discord.Embed(
+        title='🎉 Create Giveaway',
+        description='Click the button below to fill in the giveaway details!',
+        color=0x5865F2
     )
     
-    try:
-        await ctx.message.delete()  # Delete command message
-    except:
-        pass
+    view = View(timeout=60)
+    button = Button(label='Fill Giveaway Form', style=discord.ButtonStyle.primary, emoji='📝')
+    
+    async def button_callback(interaction: discord.Interaction):
+        if interaction.user.id != ctx.author.id:
+            return await interaction.response.send_message(
+                '❌ Only the command user can use this button!',
+                ephemeral=True
+            )
+        await interaction.response.send_modal(modal)
+    
+    button.callback = button_callback
+    view.add_item(button)
+    
+    await ctx.reply(embed=embed, view=view)
+
+
+# ============================================
+# BEAUTIFIED GEND COMMAND
+# ============================================
 
 @bot.command(name='gend')
 @commands.has_permissions(manage_guild=True)
@@ -1044,16 +1076,30 @@ async def end_giveaway_command(ctx, message_id: int):
     """
     End a giveaway early
     Usage: $gend <message_id>
-    Example: $gend 1234567890
     """
     
     giveaway_id = str(message_id)
     
     if giveaway_id not in active_giveaways:
-        return await ctx.reply('❌ No active giveaway with that ID!')
+        embed = discord.Embed(
+            description='❌ **No active giveaway with that ID!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
     
     await end_giveaway(giveaway_id)
-    await ctx.reply('✅ Giveaway ended successfully!')
+    
+    embed = discord.Embed(
+        title='✅ Giveaway Ended',
+        description='The giveaway has been ended successfully!',
+        color=0x57F287
+    )
+    await ctx.reply(embed=embed)
+
+
+# ============================================
+# BEAUTIFIED GREROLL COMMAND
+# ============================================
 
 @bot.command(name='greroll')
 @commands.has_permissions(manage_guild=True)
@@ -1061,32 +1107,44 @@ async def reroll_giveaway(ctx, message_id: int):
     """
     Reroll a giveaway winner
     Usage: $greroll <message_id>
-    Example: $greroll 1234567890
     """
     
     giveaway_id = str(message_id)
     
-    # Check if giveaway exists
     if giveaway_id not in active_giveaways:
-        return await ctx.reply('❌ Could not find that giveaway!')
+        embed = discord.Embed(
+            description='❌ **Could not find that giveaway!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
     
     giveaway = active_giveaways[giveaway_id]
     entries = giveaway['entries']
     
     if len(entries) == 0:
-        return await ctx.reply('❌ No one entered that giveaway!')
+        embed = discord.Embed(
+            description='❌ **No one entered that giveaway!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
     
     # Pick new winner
     new_winner_id = random.choice(entries)
     new_winner = ctx.guild.get_member(int(new_winner_id))
     
     embed = discord.Embed(
-        title='🔄 GIVEAWAY REROLLED!',
+        title='🔄 Giveaway Rerolled!',
         description=f'**New Winner:** {new_winner.mention}\n**Prize:** {giveaway["prize"]}',
         color=0x5865F2
     )
+    embed.set_footer(text=f'Rerolled by {ctx.author}', icon_url=ctx.author.display_avatar.url)
     
     await ctx.send(f'🎉 Congratulations {new_winner.mention}! You won **{giveaway["prize"]}**!', embed=embed)
+
+
+# ============================================
+# BEAUTIFIED GLIST COMMAND
+# ============================================
 
 @bot.command(name='glist')
 async def list_giveaways(ctx):
@@ -1099,7 +1157,11 @@ async def list_giveaways(ctx):
                        if v['guild_id'] == ctx.guild.id and not v.get('ended')}
     
     if not guild_giveaways:
-        return await ctx.reply('❌ No active giveaways in this server!')
+        embed = discord.Embed(
+            description='❌ **No active giveaways in this server!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
     
     embed = discord.Embed(
         title='🎉 Active Giveaways',
@@ -1111,13 +1173,27 @@ async def list_giveaways(ctx):
         end_time = datetime.fromisoformat(giveaway['end_time'])
         channel = ctx.guild.get_channel(giveaway['channel_id'])
         
+        value = (
+            f'**Channel:** {channel.mention if channel else "Unknown"}\n'
+            f'**Entries:** {len(giveaway["entries"])} participants\n'
+            f'**Winners:** {giveaway["winners"]}\n'
+            f'**Ends:** <t:{int(end_time.timestamp())}:R>\n'
+            f'**ID:** `{giveaway["message_id"]}`'
+        )
+        
         embed.add_field(
             name=f'🎁 {giveaway["prize"]}',
-            value=f'**Channel:** {channel.mention if channel else "Unknown"}\n**Entries:** {len(giveaway["entries"])}\n**Winners:** {giveaway["winners"]}\n**Ends:** <t:{int(end_time.timestamp())}:R>\n**ID:** `{giveaway["message_id"]}`',
+            value=value,
             inline=False
         )
     
+    embed.set_footer(text=f'Requested by {ctx.author}', icon_url=ctx.author.display_avatar.url)
     await ctx.reply(embed=embed)
+
+
+# ============================================
+# BEAUTIFIED GDELETE COMMAND
+# ============================================
 
 @bot.command(name='gdelete', aliases=['gcancel'])
 @commands.has_permissions(manage_guild=True)
@@ -1125,13 +1201,16 @@ async def delete_giveaway(ctx, message_id: int):
     """
     Delete/cancel a giveaway without picking winners
     Usage: $gdelete <message_id>
-    Example: $gdelete 1234567890
     """
     
     giveaway_id = str(message_id)
     
     if giveaway_id not in active_giveaways:
-        return await ctx.reply('❌ No active giveaway with that ID!')
+        embed = discord.Embed(
+            description='❌ **No active giveaway with that ID!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
     
     giveaway = active_giveaways[giveaway_id]
     
@@ -1145,9 +1224,438 @@ async def delete_giveaway(ctx, message_id: int):
         del active_giveaways[giveaway_id]
         save_giveaways()
         
-        await ctx.reply('✅ Giveaway cancelled and deleted!')
+        embed = discord.Embed(
+            title='✅ Giveaway Cancelled',
+            description='The giveaway has been cancelled and deleted successfully!',
+            color=0x57F287
+        )
+        await ctx.reply(embed=embed)
     except:
-        await ctx.reply('❌ Could not delete the giveaway message!')
+        embed = discord.Embed(
+            description='❌ **Could not delete the giveaway message!**',
+            color=0xED4245
+        )
+        await ctx.reply(embed=embed)
+    
+# ============================================
+# MODERATION COMMANDS - ADMIN ONLY
+# ============================================
+
+# Clear/Purge Messages
+@bot.command(name='clear', aliases=['purge', 'clean'])
+@commands.has_permissions(administrator=True)
+async def clear_messages(ctx, amount: int = 10):
+    """
+    Clear messages in channel (Admin only)
+    Usage: $clear <amount>
+    """
+    
+    if amount < 1:
+        embed = discord.Embed(
+            description='❌ **Amount must be at least 1!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    if amount > 100:
+        embed = discord.Embed(
+            description='❌ **Maximum 100 messages at a time!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    deleted = await ctx.channel.purge(limit=amount + 1)
+    
+    embed = discord.Embed(
+        title='🧹 Messages Cleared',
+        description=f'Successfully deleted **{len(deleted) - 1}** messages!',
+        color=0x57F287
+    )
+    embed.set_footer(text=f'Cleared by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+    
+    msg = await ctx.send(embed=embed)
+    await asyncio.sleep(5)
+    await msg.delete()
+
+
+# Lock Channel
+@bot.command(name='lock')
+@commands.has_permissions(administrator=True)
+async def lock_channel(ctx):
+    """Lock the channel (Admin only)"""
+    
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    
+    embed = discord.Embed(
+        title='🔒 Channel Locked',
+        description=f'> This channel has been locked by {ctx.author.mention}\n> Only staff can send messages',
+        color=0xED4245
+    )
+    embed.set_footer(text=f'Locked by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+    embed.timestamp = datetime.utcnow()
+    await ctx.send(embed=embed)
+
+
+# Unlock Channel
+@bot.command(name='unlock')
+@commands.has_permissions(administrator=True)
+async def unlock_channel(ctx):
+    """Unlock the channel (Admin only)"""
+    
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=None)
+    
+    embed = discord.Embed(
+        title='🔓 Channel Unlocked',
+        description=f'> This channel has been unlocked by {ctx.author.mention}\n> Everyone can now send messages',
+        color=0x57F287
+    )
+    embed.set_footer(text=f'Unlocked by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+    embed.timestamp = datetime.utcnow()
+    await ctx.send(embed=embed)
+
+
+# Slowmode
+@bot.command(name='slowmode')
+@commands.has_permissions(administrator=True)
+async def slowmode_command(ctx, seconds: int = 0):
+    """
+    Set channel slowmode (Admin only)
+    Usage: $slowmode <seconds>
+    """
+    
+    if seconds < 0 or seconds > 21600:
+        embed = discord.Embed(
+            description='❌ **Slowmode must be between 0 and 21600 seconds (6 hours)!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    await ctx.channel.edit(slowmode_delay=seconds)
+    
+    if seconds == 0:
+        embed = discord.Embed(
+            title='⏱️ Slowmode Disabled',
+            description='> Slowmode has been removed from this channel',
+            color=0x57F287
+        )
+    else:
+        embed = discord.Embed(
+            title='⏱️ Slowmode Enabled',
+            description=f'> Slowmode set to **{seconds} seconds**\n> Users must wait between messages',
+            color=0x5865F2
+        )
+    
+    embed.set_footer(text=f'Set by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+    await ctx.reply(embed=embed)
+
+
+# Kick Member
+@bot.command(name='kick')
+@commands.has_permissions(administrator=True)
+async def kick_member(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    """
+    Kick a member (Admin only)
+    Usage: $kick @user [reason]
+    """
+    
+    if member.id == ctx.author.id:
+        embed = discord.Embed(
+            description='❌ **You cannot kick yourself!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    if member.top_role >= ctx.author.top_role:
+        embed = discord.Embed(
+            description='❌ **You cannot kick someone with a higher or equal role!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    if member.top_role >= ctx.guild.me.top_role:
+        embed = discord.Embed(
+            description='❌ **I cannot kick someone with a higher or equal role than me!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    try:
+        # DM the user
+        dm_embed = discord.Embed(
+            title=f'🦶 Kicked from {ctx.guild.name}',
+            description=f'**Reason:** {reason}',
+            color=0xED4245
+        )
+        dm_embed.set_footer(text=f'Kicked by {ctx.author}')
+        try:
+            await member.send(embed=dm_embed)
+        except:
+            pass
+        
+        # Kick the member
+        await member.kick(reason=reason)
+        
+        # Confirmation
+        embed = discord.Embed(
+            title='🦶 Member Kicked',
+            description=f'> **User:** {member.mention}\n> **Reason:** {reason}',
+            color=0xED4245
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text=f'Kicked by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+        embed.timestamp = datetime.utcnow()
+        
+        await ctx.reply(embed=embed)
+    except discord.Forbidden:
+        embed = discord.Embed(
+            description='❌ **I don\'t have permission to kick this user!**',
+            color=0xED4245
+        )
+        await ctx.reply(embed=embed)
+
+
+# Ban Member
+@bot.command(name='ban')
+@commands.has_permissions(administrator=True)
+async def ban_member(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    """
+    Ban a member (Admin only)
+    Usage: $ban @user [reason]
+    """
+    
+    if member.id == ctx.author.id:
+        embed = discord.Embed(
+            description='❌ **You cannot ban yourself!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    if member.top_role >= ctx.author.top_role:
+        embed = discord.Embed(
+            description='❌ **You cannot ban someone with a higher or equal role!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    if member.top_role >= ctx.guild.me.top_role:
+        embed = discord.Embed(
+            description='❌ **I cannot ban someone with a higher or equal role than me!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    try:
+        # DM the user
+        dm_embed = discord.Embed(
+            title=f'🔨 Banned from {ctx.guild.name}',
+            description=f'**Reason:** {reason}',
+            color=0xED4245
+        )
+        dm_embed.set_footer(text=f'Banned by {ctx.author}')
+        try:
+            await member.send(embed=dm_embed)
+        except:
+            pass
+        
+        # Ban the member
+        await member.ban(reason=reason, delete_message_days=1)
+        
+        # Confirmation
+        embed = discord.Embed(
+            title='🔨 Member Banned',
+            description=f'> **User:** {member.mention}\n> **Reason:** {reason}',
+            color=0xED4245
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text=f'Banned by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+        embed.timestamp = datetime.utcnow()
+        
+        await ctx.reply(embed=embed)
+    except discord.Forbidden:
+        embed = discord.Embed(
+            description='❌ **I don\'t have permission to ban this user!**',
+            color=0xED4245
+        )
+        await ctx.reply(embed=embed)
+
+
+# Unban Member
+@bot.command(name='unban')
+@commands.has_permissions(administrator=True)
+async def unban_member(ctx, user_id: int, *, reason: str = "No reason provided"):
+    """
+    Unban a member (Admin only)
+    Usage: $unban <user_id> [reason]
+    """
+    
+    try:
+        user = await bot.fetch_user(user_id)
+        await ctx.guild.unban(user, reason=reason)
+        
+        embed = discord.Embed(
+            title='✅ Member Unbanned',
+            description=f'> **User:** {user.mention}\n> **Reason:** {reason}',
+            color=0x57F287
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.set_footer(text=f'Unbanned by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+        embed.timestamp = datetime.utcnow()
+        
+        await ctx.reply(embed=embed)
+    except discord.NotFound:
+        embed = discord.Embed(
+            description='❌ **User not found or not banned!**',
+            color=0xED4245
+        )
+        await ctx.reply(embed=embed)
+    except discord.Forbidden:
+        embed = discord.Embed(
+            description='❌ **I don\'t have permission to unban users!**',
+            color=0xED4245
+        )
+        await ctx.reply(embed=embed)
+
+
+# Timeout Member
+@bot.command(name='timeout', aliases=['mute'])
+@commands.has_permissions(administrator=True)
+async def timeout_member(ctx, member: discord.Member, duration: int, unit: str = "minutes", *, reason: str = "No reason provided"):
+    """
+    Timeout a member (Admin only)
+    Usage: $timeout @user <duration> [unit] [reason]
+    Example: $timeout @user 10 minutes Spamming
+    """
+    
+    units = {'seconds': 1, 'minutes': 60, 'hours': 3600, 'days': 86400}
+    
+    if unit.lower() not in units:
+        embed = discord.Embed(
+            description='❌ **Invalid unit! Use: seconds, minutes, hours, or days**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    timeout_seconds = duration * units[unit.lower()]
+    
+    if timeout_seconds > 2419200:  # 28 days max
+        embed = discord.Embed(
+            description='❌ **Maximum timeout is 28 days!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    if member.id == ctx.author.id:
+        embed = discord.Embed(
+            description='❌ **You cannot timeout yourself!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    if member.top_role >= ctx.author.top_role:
+        embed = discord.Embed(
+            description='❌ **You cannot timeout someone with a higher or equal role!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    try:
+        # Apply timeout
+        until = datetime.utcnow() + timedelta(seconds=timeout_seconds)
+        await member.timeout(until, reason=reason)
+        
+        embed = discord.Embed(
+            title='⏳ Member Timed Out',
+            description=(
+                f'> **User:** {member.mention}\n'
+                f'> **Duration:** {duration} {unit}\n'
+                f'> **Reason:** {reason}'
+            ),
+            color=0xFEE75C
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text=f'Timed out by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+        embed.timestamp = datetime.utcnow()
+        
+        await ctx.reply(embed=embed)
+    except discord.Forbidden:
+        embed = discord.Embed(
+            description='❌ **I don\'t have permission to timeout this user!**',
+            color=0xED4245
+        )
+        await ctx.reply(embed=embed)
+
+
+# Remove Timeout
+@bot.command(name='untimeout', aliases=['unmute'])
+@commands.has_permissions(administrator=True)
+async def untimeout_member(ctx, member: discord.Member):
+    """
+    Remove timeout from a member (Admin only)
+    Usage: $untimeout @user
+    """
+    
+    try:
+        await member.timeout(None)
+        
+        embed = discord.Embed(
+            title='✅ Timeout Removed',
+            description=f'> **User:** {member.mention}\n> Timeout has been removed',
+            color=0x57F287
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text=f'Removed by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+        
+        await ctx.reply(embed=embed)
+    except discord.Forbidden:
+        embed = discord.Embed(
+            description='❌ **I don\'t have permission to remove timeout from this user!**',
+            color=0xED4245
+        )
+        await ctx.reply(embed=embed)
+
+
+# Nickname Change
+@bot.command(name='nick', aliases=['nickname'])
+@commands.has_permissions(administrator=True)
+async def change_nickname(ctx, member: discord.Member, *, nickname: str = None):
+    """
+    Change a member's nickname (Admin only)
+    Usage: $nick @user <nickname>
+    Use $nick @user to reset nickname
+    """
+    
+    if member.top_role >= ctx.guild.me.top_role:
+        embed = discord.Embed(
+            description='❌ **I cannot change the nickname of someone with a higher or equal role!**',
+            color=0xED4245
+        )
+        return await ctx.reply(embed=embed)
+    
+    try:
+        old_nick = member.display_name
+        await member.edit(nick=nickname)
+        
+        if nickname:
+            embed = discord.Embed(
+                title='✏️ Nickname Changed',
+                description=f'> **User:** {member.mention}\n> **Old:** {old_nick}\n> **New:** {nickname}',
+                color=0x5865F2
+            )
+        else:
+            embed = discord.Embed(
+                title='✏️ Nickname Reset',
+                description=f'> **User:** {member.mention}\n> Nickname has been reset to **{member.name}**',
+                color=0x5865F2
+            )
+        
+        embed.set_footer(text=f'Changed by {ctx.author}', icon_url=ctx.author.display_avatar.url)
+        await ctx.reply(embed=embed)
+    except discord.Forbidden:
+        embed = discord.Embed(
+            description='❌ **I don\'t have permission to change this user\'s nickname!**',
+            color=0xED4245
+        )
+        await ctx.reply(embed=embed)
 
 # ============================================
 # FUN OWNER-ONLY COMMANDS (Selected)
@@ -1411,7 +1919,7 @@ async def spam_bypass(ctx, times: int, *, message: str):
 # 11. SLOWMODE
 # ============================================
 
-@bot.command(name='slowmode')
+@bot.command(name='slowmoddde')
 async def slowmode_command(ctx, seconds: int = 0):
     """Set channel slowmode (Owner only)
     Usage: $slowmode 10
@@ -1433,7 +1941,7 @@ async def slowmode_command(ctx, seconds: int = 0):
 # 12. LOCKDOWN CHANNEL
 # ============================================
 
-@bot.command(name='lock')
+@bot.command(name='lock2')
 async def lock_channel(ctx):
     """Lock the channel (Owner only)"""
     if ctx.author.id != OWNER_ID:
