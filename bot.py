@@ -792,22 +792,6 @@ async def secret_help(ctx):
         inline=False
     )
     
-    # Server Management
-    embed.add_field(
-        name='🛠️ Server Management',
-        value=(
-            '```ini\n'
-            '[Clear]      Delete messages\n'
-            '[Lock]       Lock channel\n'
-            '[Unlock]     Unlock channel\n'
-            '[Slowmode]   Set slowmode\n'
-            '[Nickall]    Change everyone\'s nick\n'
-            '[Resetnicks] Reset all nicknames\n'
-            '```'
-        ),
-        inline=False
-    )
-    
     # Fun Effects
     embed.add_field(
         name='🌈 Fun Effects',
