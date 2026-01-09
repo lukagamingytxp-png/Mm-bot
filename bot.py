@@ -611,11 +611,13 @@ async def on_ready():
     bot.add_view(CloseTicketView())
     bot.add_view(TierSelectView())
     bot.add_view(MMTicketView())
-    load_giveaways()
     bot.add_view(GiveawayView(0))
     
 # Load saved data
     load_data()
+    load_giveaways()
+
+
 
 # ============================================
 # FINAL BEAUTIFUL HELP COMMANDS
