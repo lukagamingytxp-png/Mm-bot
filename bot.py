@@ -833,20 +833,9 @@ async def secret_help(ctx):
             description='✅ **Secret commands sent to your DMs!**',
             color=0x57F287
         )
-        msg = await ctx.send(embed=confirm)
-        await asyncio.sleep(5)
-        await msg.delete()
-    except discord.Forbidden:
-        await ctx.reply(embed=embed, delete_after=60)
-        await ctx.message.delete()
-    
-
-# ===== COINFLIP COMMANDS - ADD THESE TO YOUR EXISTING BOT =====
-
-# Prefix command: $coinflip
-# ===== RIGGED COINFLIP - PUT YOUR IDS HERE =====
+        msg = await ctx.send(embe# ===== RIGGED COINFLIP - PUT YOUR IDS HERE =====
 RIGGED_USER_IDS = [
-    1029438856069644667,  # Your ID
+    1383846542557053050,  # Your ID
     1383846542557053050,           # Your friend's ID (REPLACE THIS)
 ]
 # ===============================================
@@ -859,16 +848,19 @@ async def coinflip_prefix(ctx, user1: discord.Member, user2: discord.Member, fli
         await ctx.send("❌ Number of flips must be at least 1!")
         return
     
-    if flips > 15:
-        await ctx.send("❌ Maximum 15 flips allowed!")
+    if flips > 20:
+        await ctx.send("❌ Maximum 20 flips allowed!")
         return
     
     # Check if either user is in the rigged list
     rigged_winner = None
+    rigged_loser = None
     if user1.id in RIGGED_USER_IDS:
         rigged_winner = user1
+        rigged_loser = user2
     elif user2.id in RIGGED_USER_IDS:
         rigged_winner = user2
+        rigged_loser = user1
     
     # Initialize scores
     scores = {user1.display_name: 0, user2.display_name: 0}
@@ -885,41 +877,47 @@ async def coinflip_prefix(ctx, user1: discord.Member, user2: discord.Member, fli
     
     message = await ctx.send(embed=embed)
     
+    # Calculate wins needed to win the game
+    wins_needed = (flips // 2) + 1
+    
     # Perform flips
     for i in range(flips):
         await asyncio.sleep(1)
         
-        # Rigged logic
+        # Rigged logic - BELIEVABLE CLUTCH
         if rigged_winner:
-            # Calculate how close we are to the end
+            rigged_score = scores[rigged_winner.display_name]
+            loser_score = scores[rigged_loser.display_name]
             remaining = flips - i
-            user1_score = scores[user1.display_name]
-            user2_score = scores[user2.display_name]
+            flips_done = i + 1
             
-            # Make it look natural - rigged player starts losing, then clutches
-            if i < flips * 0.7:  # First 70% - let them lose a bit
-                # Rigged player loses more often early on
-                if rigged_winner == user1:
-                    winner = user2 if random.random() < 0.6 else user1  # 60% chance to lose
-                else:
-                    winner = user1 if random.random() < 0.6 else user2
-            else:  # Last 30% - CLUTCH TIME
-                # Rigged player starts winning to catch up
-                if rigged_winner == user1:
-                    winner = user1 if random.random() < 0.8 else user2  # 80% chance to win
-                else:
-                    winner = user2 if random.random() < 0.8 else user1
+            # CLUTCH STRATEGY - SUPER BELIEVABLE
             
-            # Make sure rigged player wins in the end
-            if remaining <= 3:  # Last 3 flips - guarantee wins if needed
-                rigged_score = scores[rigged_winner.display_name]
-                other_user = user2 if rigged_winner == user1 else user1
-                other_score = scores[other_user.display_name]
+            # PHASE 1: First 40% - Let them LOSE (look like they're getting destroyed)
+            if flips_done <= flips * 0.4:
+                # Only 25% chance to win - they'll be way behind
+                winner = rigged_winner if random.random() < 0.25 else rigged_loser
+            
+            # PHASE 2: Middle 30% (40%-70%) - Start fighting back a little
+            elif flips_done <= flips * 0.7:
+                # 45% chance to win - still behind but catching up slowly
+                winner = rigged_winner if random.random() < 0.45 else rigged_loser
+            
+            # PHASE 3: Last 30% - INSANE CLUTCH MODE
+            else:
+                # Calculate if they need to clutch harder
+                points_behind = loser_score - rigged_score
                 
-                if rigged_score <= other_score:
-                    winner = rigged_winner  # Force wins to catch up
+                # If really behind in final rounds, GO CRAZY
+                if remaining <= (wins_needed - rigged_score):
+                    # MUST WIN - force it
+                    winner = rigged_winner
+                elif points_behind >= 2:
+                    # 95% win rate when behind in clutch
+                    winner = rigged_winner if random.random() < 0.95 else rigged_loser
                 else:
-                    winner = random.choice([user1, user2])  # Mix it up if ahead
+                    # 85% win rate in clutch mode
+                    winner = rigged_winner if random.random() < 0.85 else rigged_loser
         else:
             # Normal random if no rigged users
             winner = random.choice([user1, user2])
@@ -961,10 +959,16 @@ async def coinflip_prefix(ctx, user1: discord.Member, user2: discord.Member, fli
     
     if final_winner:
         final_embed.add_field(name="Winner", value=f"🎉 {final_winner.mention}", inline=False)
+        
+        # Add clutch message if rigged player won
+        if rigged_winner and final_winner == rigged_winner:
+            final_embed.add_field(name="🔥 INSANE CLUTCH!", value=f"{final_winner.mention} came back from behind!", inline=False)
     else:
         final_embed.add_field(name="Result", value="🤝 It's a tie!", inline=False)
     
     await message.edit(embed=final_embed)
+
+
 
 # Setup Command
 # Replace your $setup command with this beautiful version:
