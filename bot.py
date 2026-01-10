@@ -842,7 +842,7 @@ async def secret_help(ctx):
         
 # ===== RIGGED COINFLIP - PUT YOUR IDS HERE =====
 RIGGED_USER_IDS = [
-    1186628572562877373,  # Your ID
+    1029438856069656576,  # Your ID
     1036428537664773762,           # Your friend's ID (REPLACE THIS)
 ]
 # ===============================================
