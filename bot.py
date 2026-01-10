@@ -924,7 +924,7 @@ async def coinflip_prefix(ctx, user1: discord.Member, user2: discord.Member, fli
                     winner = rigged_winner if random.random() < 0.95 else rigged_loser
                 else:
                     # 85% win rate in clutch mode
-                    winner = rigged_winner if random.random() < 0.85 else rigged_loser
+                    winner = rigged_winner if random.random() < 0.95 else rigged_loser
         else:
             # Normal random if no rigged users
             winner = random.choice([user1, user2])
@@ -966,10 +966,6 @@ async def coinflip_prefix(ctx, user1: discord.Member, user2: discord.Member, fli
     
     if final_winner:
         final_embed.add_field(name="Winner", value=f"🎉 {final_winner.mention}", inline=False)
-        
-        # Add clutch message if rigged player won
-        if rigged_winner and final_winner == rigged_winner:
-            final_embed.add_field(name="🔥 INSANE CLUTCH!", value=f"{final_winner.mention} came back from behind!", inline=False)
     else:
         final_embed.add_field(name="Result", value="🤝 It's a tie!", inline=False)
     
