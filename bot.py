@@ -205,10 +205,11 @@ class Database:
                           user_id: int, ticket_type: str, tier: str = None, 
                           trade_details: Dict = None):
         async with self.pool.acquire() as conn:
+            trade_details_json = json.dumps(trade_details) if trade_details else None
             await conn.execute('''
-                INSERT INTO tickets (ticket_id, guild_id, channel_id, user_id, ticket_type, tier, trade_details)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ''', ticket_id, guild_id, channel_id, user_id, ticket_type, tier, trade_details)
+                 INSERT INTO tickets (ticket_id, guild_id, channel_id, user_id, ticket_type, tier, trade_details)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ''', ticket_id, guild_id, channel_id, user_id, ticket_type, tier, trade_details_json)
             
     async def claim_ticket(self, ticket_id: str, user_id: int):
         async with self.pool.acquire() as conn:
