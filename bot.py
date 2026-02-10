@@ -11,6 +11,8 @@ import string
 from typing import Optional, Dict, List
 import asyncio
 from collections import defaultdict
+import json
+import io
 
 # Setup logging
 logging.basicConfig(
@@ -424,11 +426,19 @@ async def create_ticket(guild: discord.Guild, user: discord.Member,
     
     view = TicketControlView()
     
-    ping_msg = ""
-    if role_id:
+    ping_msg = user.mention
+    
+    if ticket_type == 'middleman' and tier_id:
+        tiers = await db.get_mm_tiers(guild.id)
+        tier_data = next((t for t in tiers if t['tier_id'] == tier_id), None)
+        if tier_data and tier_data.get('role_id'):
+            tier_role = guild.get_role(tier_data['role_id'])
+            if tier_role:
+                ping_msg += f" {tier_role.mention}"
+    elif role_id:
         role = guild.get_role(role_id)
         if role:
-            ping_msg = role.mention
+            ping_msg += f" {role.mention}"
     
     await channel.send(content=ping_msg, embed=embed, view=view)
     
@@ -521,6 +531,34 @@ async def close_ticket(channel: discord.TextChannel, closed_by: discord.Member):
             opener = channel.guild.get_member(ticket['user_id'])
             claimer = channel.guild.get_member(ticket['claimed_by']) if ticket.get('claimed_by') else None
             
+            # Generate transcript
+            transcript = f"TICKET TRANSCRIPT\n"
+            transcript += f"Ticket ID: {ticket['ticket_id']}\n"
+            transcript += f"Type: {ticket['ticket_type'].title()}\n"
+            transcript += f"Opened by: {opener.name if opener else 'Unknown'}\n"
+            transcript += f"Claimed by: {claimer.name if claimer else 'Unclaimed'}\n"
+            transcript += f"Closed by: {closed_by.name}\n"
+            transcript += f"Created: {ticket['created_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+            transcript += f"\n{'='*50}\nMESSAGES\n{'='*50}\n\n"
+            
+            messages = []
+            async for msg in channel.history(limit=100, oldest_first=True):
+                timestamp = msg.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                content = msg.content if msg.content else '[No text content]'
+                
+                if msg.attachments:
+                    content += f" [Attachments: {', '.join([a.filename for a in msg.attachments])}]"
+                
+                messages.append(f"[{timestamp}] {msg.author.name}: {content}")
+            
+            transcript += '\n'.join(messages)
+            
+            # Save transcript to file
+            transcript_file = discord.File(
+                fp=io.BytesIO(transcript.encode('utf-8')),
+                filename=f"transcript-{ticket['ticket_id']}.txt"
+            )
+            
             log_embed = discord.Embed(
                 title='🔒 Ticket Closed',
                 color=0xED4245
@@ -536,15 +574,23 @@ async def close_ticket(channel: discord.TextChannel, closed_by: discord.Member):
                 log_embed.add_field(name='MM Tier', value=ticket['tier'], inline=True)
             
             if ticket.get('trade_details'):
-                details = ticket['trade_details']
-                trade_info = f"**Trading with:** {details.get('trader', 'N/A')}\n"
-                trade_info += f"**Giving:** {details.get('giving', 'N/A')}\n"
-                trade_info += f"**Receiving:** {details.get('receiving', 'N/A')}"
-                if details.get('tip') and details['tip'] != 'None':
-                    trade_info += f"\n**Tip:** {details['tip']}"
-                log_embed.add_field(name='Trade Details', value=trade_info, inline=False)
+                try:
+                    details = json.loads(ticket['trade_details']) if isinstance(ticket['trade_details'], str) else ticket['trade_details']
+                    trade_info = f"**Trading with:** {details.get('trader', 'N/A')}\n"
+                    trade_info += f"**Giving:** {details.get('giving', 'N/A')}\n"
+                    trade_info += f"**Receiving:** {details.get('receiving', 'N/A')}"
+                    if details.get('tip') and details['tip'] != 'None':
+                        trade_info += f"\n**Tip:** {details['tip']}"
+                    log_embed.add_field(name='Trade Details', value=trade_info, inline=False)
+                except:
+                    pass
             
             duration = datetime.utcnow() - ticket['created_at']
+            hours = int(duration.total_seconds() // 3600)
+            minutes = int((duration.total_seconds() % 3600) // 60)
+            log_embed.add_field(name='Duration', value=f"{hours}h {minutes}m", inline=True)
+            
+            await log_channel.send(embed=log_embed, file=transcript_file)
             hours = int(duration.total_seconds() // 3600)
             minutes = int((duration.total_seconds() % 3600) // 60)
             log_embed.add_field(name='Duration', value=f"{hours}h {minutes}m", inline=True)
@@ -751,7 +797,7 @@ class MiddlemanModal(Modal, title='Middleman Request'):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            await create_ticket(
+            channel = await create_ticket(
                 interaction.guild,
                 interaction.user,
                 'middleman',
@@ -763,7 +809,7 @@ class MiddlemanModal(Modal, title='Middleman Request'):
                     'tip': self.tip.value or 'None'
                 }
             )
-            await interaction.followup.send('✅ Ticket created!', ephemeral=True)
+            await interaction.followup.send(f'✅ Ticket created: {channel.mention}', ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f'❌ Error: {str(e)}', ephemeral=True)
 
@@ -882,8 +928,8 @@ class TicketPanelView(View):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            await create_ticket(interaction.guild, interaction.user, 'partnership')
-            await interaction.followup.send('✅ Ticket created!', ephemeral=True)
+            channel = await create_ticket(interaction.guild, interaction.user, 'partnership')
+            await interaction.followup.send(f'✅ Ticket created: {channel.mention}', ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f'❌ Error: {str(e)}', ephemeral=True)
     
@@ -922,8 +968,8 @@ class TicketPanelView(View):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            await create_ticket(interaction.guild, interaction.user, 'support')
-            await interaction.followup.send('✅ Ticket created!', ephemeral=True)
+            channel = await create_ticket(interaction.guild, interaction.user, 'support')
+            await interaction.followup.send(f'✅ Ticket created: {channel.mention}', ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f'❌ Error: {str(e)}', ephemeral=True)
 
@@ -957,15 +1003,18 @@ class TicketControlView(View):
         if not rate_limiter.check_cooldown(interaction.user.id, 'unclaim', 2):
             return await interaction.response.send_message('⏱️ Slow down!', ephemeral=True)
         
-        # Check if user has MM role
-        mm_role_id = await db.get_ticket_role(interaction.guild.id, 'middleman')
+        tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', interaction.channel.id)
         
-        has_mm_role = False
-        if mm_role_id:
-            has_mm_role = any(role.id == mm_role_id for role in interaction.user.roles)
+        if not tickets:
+            return await interaction.response.send_message('❌ Not a ticket!', ephemeral=True)
         
-        if not has_mm_role and not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message('❌ Only middlemen can unclaim tickets!', ephemeral=True)
+        ticket = dict(tickets[0])
+        
+        if not ticket.get('claimed_by'):
+            return await interaction.response.send_message('❌ Ticket is not claimed!', ephemeral=True)
+        
+        if ticket['claimed_by'] != interaction.user.id:
+            return await interaction.response.send_message('❌ Only the claimer can unclaim!', ephemeral=True)
         
         try:
             await unclaim_ticket(interaction.channel)
@@ -978,14 +1027,23 @@ class TicketControlView(View):
         if not rate_limiter.check_cooldown(interaction.user.id, 'close', 3):
             return await interaction.response.send_message('⏱️ Wait before closing!', ephemeral=True)
         
-        # Check if user has MM role
+        tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', interaction.channel.id)
+        
+        if not tickets:
+            return await interaction.response.send_message('❌ Not a ticket!', ephemeral=True)
+        
+        ticket = dict(tickets[0])
+        
+        if ticket.get('claimed_by') and ticket['claimed_by'] != interaction.user.id:
+            return await interaction.response.send_message('❌ Only the claimer can close!', ephemeral=True)
+        
         mm_role_id = await db.get_ticket_role(interaction.guild.id, 'middleman')
         
         has_mm_role = False
         if mm_role_id:
             has_mm_role = any(role.id == mm_role_id for role in interaction.user.roles)
         
-        if not has_mm_role and not interaction.user.guild_permissions.administrator:
+        if not has_mm_role:
             return await interaction.response.send_message('❌ Only middlemen can close tickets!', ephemeral=True)
         
         await interaction.response.send_message('🔒 Closing ticket...', ephemeral=True)
@@ -1079,13 +1137,113 @@ async def on_ready():
 @bot.command(name='setup')
 @commands.has_permissions(administrator=True)
 async def setup_panel(ctx):
-    embed = create_panel_embed()
-    view = TicketPanelView()
+    """Legacy command - use $setuppartnership, $setupmiddleman, or $setupsupport"""
+    embed = discord.Embed(
+        title='Setup Commands',
+        description='Use individual setup commands:\n`$setuppartnership`\n`$setupmiddleman`\n`$setupsupport`',
+        color=0x5865F2
+    )
+    await ctx.reply(embed=embed)
+
+@bot.command(name='setuppartnership')
+@commands.has_permissions(administrator=True)
+async def setup_partnership(ctx):
+    """Create partnership panel"""
+    embed = discord.Embed(
+        title='Partnership',
+        description='Partner with other servers and communities\n\nClick the button below to open a partnership ticket',
+        color=0x5865F2
+    )
     
-    message = await ctx.send(embed=embed, view=view)
-    await db.set_config(ctx.guild.id, panel_message_id=message.id)
+    class PartnershipView(View):
+        def __init__(self):
+            super().__init__(timeout=None)
+        
+        @discord.ui.button(label='Open Partnership Ticket', style=discord.ButtonStyle.primary, emoji='🤝', custom_id='partnership_panel_btn')
+        async def partnership_btn(self, interaction: discord.Interaction, button: Button):
+            if not rate_limiter.check_cooldown(interaction.user.id, 'ticket_create', 10):
+                return await interaction.response.send_message('Slow down! Wait 10 seconds', ephemeral=True)
+            
+            await interaction.response.defer(ephemeral=True)
+            
+            try:
+                channel = await create_ticket(interaction.guild, interaction.user, 'partnership')
+                await interaction.followup.send(f'✅ Ticket created: {channel.mention}', ephemeral=True)
+            except Exception as e:
+                await interaction.followup.send(f'❌ Error: {str(e)}', ephemeral=True)
     
-    await ctx.reply('✅ Ticket panel created!', delete_after=5)
+    await ctx.send(embed=embed, view=PartnershipView())
+    await ctx.message.delete()
+
+@bot.command(name='setupmiddleman')
+@commands.has_permissions(administrator=True)
+async def setup_middleman(ctx):
+    """Create middleman panel"""
+    embed = discord.Embed(
+        title='Middleman Service',
+        description='Secure middleman service for trades\n\nClick the button below to request a middleman',
+        color=0xFEE75C
+    )
+    
+    class MiddlemanPanelView(View):
+        def __init__(self):
+            super().__init__(timeout=None)
+        
+        @discord.ui.button(label='Request Middleman', style=discord.ButtonStyle.success, emoji='⚖️', custom_id='mm_panel_btn')
+        async def mm_btn(self, interaction: discord.Interaction, button: Button):
+            tiers = await db.get_mm_tiers(interaction.guild.id)
+            
+            if not tiers:
+                return await interaction.response.send_message('No MM tiers configured', ephemeral=True)
+            
+            select = MiddlemanTierSelect()
+            
+            for tier in tiers:
+                select.add_option(label=tier['name'], value=tier['tier_id'], emoji=tier['emoji'])
+            
+            view = View(timeout=300)
+            view.add_item(select)
+            
+            embed = discord.Embed(
+                title='Select Trade Value',
+                description='Choose the tier that matches your trade value',
+                color=0xFEE75C
+            )
+            
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    
+    await ctx.send(embed=embed, view=MiddlemanPanelView())
+    await ctx.message.delete()
+
+@bot.command(name='setupsupport')
+@commands.has_permissions(administrator=True)
+async def setup_support(ctx):
+    """Create support panel"""
+    embed = discord.Embed(
+        title='Support',
+        description='Get help and support from our team\n\nClick the button below to open a support ticket',
+        color=0x57F287
+    )
+    
+    class SupportView(View):
+        def __init__(self):
+            super().__init__(timeout=None)
+        
+        @discord.ui.button(label='Open Support Ticket', style=discord.ButtonStyle.secondary, emoji='🎫', custom_id='support_panel_btn')
+        async def support_btn(self, interaction: discord.Interaction, button: Button):
+            if not rate_limiter.check_cooldown(interaction.user.id, 'ticket_create', 10):
+                return await interaction.response.send_message('Slow down! Wait 10 seconds', ephemeral=True)
+            
+            await interaction.response.defer(ephemeral=True)
+            
+            try:
+                channel = await create_ticket(interaction.guild, interaction.user, 'support')
+                await interaction.followup.send(f'✅ Ticket created: {channel.mention}', ephemeral=True)
+            except Exception as e:
+                await interaction.followup.send(f'❌ Error: {str(e)}', ephemeral=True)
+    
+    await ctx.send(embed=embed, view=SupportView())
+    await ctx.message.delete()
 
 @bot.command(name='setcategory')
 @commands.has_permissions(administrator=True)
@@ -1551,50 +1709,20 @@ async def feedback_stats(ctx):
     
     await ctx.reply(embed=embed)
 
-@bot.command(name='leaderboard', aliases=['lb', 'top'])
-async def leaderboard(ctx):
-    """View top staff by tickets closed"""
-    async with db.pool.acquire() as conn:
-        rows = await conn.fetch('''
-            SELECT user_id, tickets_claimed, tickets_closed 
-            FROM stats 
-            WHERE tickets_closed > 0
-            ORDER BY tickets_closed DESC 
-            LIMIT 10
-        ''')
-    
-    if not rows:
-        return await ctx.reply('No stats available yet!')
-    
-    embed = discord.Embed(
-        title='🏆 Top Staff - Leaderboard',
-        description='Top 10 by tickets closed',
-        color=0xFEE75C
-    )
-    
-    medals = ['🥇', '🥈', '🥉']
-    
-    leaderboard_text = ""
-    for i, row in enumerate(rows, 1):
-        user = ctx.guild.get_member(row['user_id'])
-        if user:
-            medal = medals[i-1] if i <= 3 else f"`{i}.`"
-            leaderboard_text += f"{medal} **{user.display_name}** - {row['tickets_closed']} closed\n"
-    
-    embed.description = leaderboard_text
-    
-    await ctx.reply(embed=embed)
-
 @bot.command(name='help')
 async def help_command(ctx):
-    embed = discord.Embed(
-        title='📚 Bot Commands',
-        description='Professional ticket management system',
+    """Display paginated help menu"""
+    
+    pages = []
+    
+    # Page 1: Ticket Commands
+    page1 = discord.Embed(
+        title='Ticket Commands',
+        description='Commands for managing tickets',
         color=0x5865F2
     )
-    
-    embed.add_field(
-        name='🎫 Ticket Commands',
+    page1.add_field(
+        name='Commands',
         value=(
             '`$close` - Close current ticket\n'
             '`$claim` - Claim ticket\n'
@@ -1602,40 +1730,94 @@ async def help_command(ctx):
             '`$add @user` - Add user to ticket\n'
             '`$remove @user` - Remove user\n'
             '`$rename <n>` - Rename ticket\n'
-            '`$stats [@user]` - View stats\n'
-            '`$leaderboard` - Top staff rankings'
+            '`$stats [@user]` - View stats'
         ),
         inline=False
     )
+    page1.set_footer(text='Page 1/3')
+    pages.append(page1)
     
+    # Page 2: Setup Commands
     if ctx.author.guild_permissions.administrator:
-        embed.add_field(
-            name='⚙️ Setup Commands',
+        page2 = discord.Embed(
+            title='Setup Commands',
+            description='Admin setup commands',
+            color=0x5865F2
+        )
+        page2.add_field(
+            name='Panel Setup',
             value=(
-                '`$setup` - Create ticket panel\n'
-                '`$setcategory #cat` - Set category\n'
-                '`$setlogs #channel` - Set logs\n'
-                '`$ticketrole <type> @role` - Set role\n'
-                '`$mmtier <id> @role <emoji> <n>` - MM tier\n'
-                '`$config` - View configuration\n'
-                '`$feedbackstats` - View feedback stats'
+                '`$setuppartnership` - Create partnership panel\n'
+                '`$setupmiddleman` - Create middleman panel\n'
+                '`$setupsupport` - Create support panel'
             ),
             inline=False
         )
-        
-        embed.add_field(
-            name='🚫 Moderation',
+        page2.add_field(
+            name='Configuration',
             value=(
-                '`$blacklist @user <reason>` - Block tickets\n'
+                '`$setcategory #cat` - Set ticket category\n'
+                '`$setlogs #channel` - Set log channel\n'
+                '`$ticketrole <type> @role` - Set ticket role\n'
+                '`$mmtier <id> @role <emoji> <n>` - Set MM tier\n'
+                '`$config` - View configuration\n'
+                '`$feedbackstats` - View feedback'
+            ),
+            inline=False
+        )
+        page2.set_footer(text='Page 2/3')
+        pages.append(page2)
+        
+        # Page 3: Moderation
+        page3 = discord.Embed(
+            title='Moderation Commands',
+            description='Moderation tools',
+            color=0x5865F2
+        )
+        page3.add_field(
+            name='Blacklist',
+            value=(
+                '`$blacklist @user <reason>` - Block user\n'
                 '`$unblacklist @user` - Unblock user\n'
                 '`$blacklists` - View blacklist'
             ),
             inline=False
         )
+        page3.add_field(
+            name='Utility',
+            value='`$clear` - Delete bot messages in channel',
+            inline=False
+        )
+        page3.set_footer(text='Page 3/3')
+        pages.append(page3)
+    else:
+        pages[0].set_footer(text='Page 1/1')
     
-    embed.set_footer(text='Feedback requested after ticket closes')
+    # Create pagination view
+    class HelpView(View):
+        def __init__(self, pages):
+            super().__init__(timeout=60)
+            self.pages = pages
+            self.current_page = 0
+            
+        @discord.ui.button(emoji='◀️', style=discord.ButtonStyle.gray)
+        async def prev_button(self, interaction: discord.Interaction, button: Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message('Not your menu', ephemeral=True)
+            
+            self.current_page = (self.current_page - 1) % len(self.pages)
+            await interaction.response.edit_message(embed=self.pages[self.current_page])
+        
+        @discord.ui.button(emoji='▶️', style=discord.ButtonStyle.gray)
+        async def next_button(self, interaction: discord.Interaction, button: Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message('Not your menu', ephemeral=True)
+            
+            self.current_page = (self.current_page + 1) % len(self.pages)
+            await interaction.response.edit_message(embed=self.pages[self.current_page])
     
-    await ctx.reply(embed=embed)
+    view = HelpView(pages) if len(pages) > 1 else None
+    await ctx.reply(embed=pages[0], view=view)
 
 @bot.command(name='ping')
 async def ping(ctx):
@@ -1648,6 +1830,29 @@ async def ping(ctx):
     )
     
     await ctx.reply(embed=embed)
+
+@bot.command(name='clear')
+@commands.has_permissions(manage_messages=True)
+async def clear_bot_messages(ctx):
+    """Delete all bot messages in the channel"""
+    deleted = 0
+    
+    async for message in ctx.channel.history(limit=100):
+        if message.author == bot.user:
+            try:
+                await message.delete()
+                deleted += 1
+                await asyncio.sleep(0.5)
+            except:
+                pass
+    
+    msg = await ctx.send(f'✅ Deleted {deleted} bot messages')
+    await asyncio.sleep(3)
+    await msg.delete()
+    try:
+        await ctx.message.delete()
+    except:
+        pass
 
 @bot.event
 async def on_command_error(ctx, error):
