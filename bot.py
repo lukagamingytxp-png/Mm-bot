@@ -682,15 +682,36 @@ async def set_proof(ctx, channel: discord.TextChannel):
     embed = discord.Embed(title='Proof Channel Set', description=f'Set to {channel.mention}', color=0x57F287)
     await ctx.reply(embed=embed)
 
+# REPLACE THE TICKETROLE COMMAND IN YOUR bot.py WITH THIS:
+
 @bot.command(name='ticketrole')
 @commands.has_permissions(administrator=True)
-async def ticket_role(ctx, tier: str, role: discord.Role):
+async def ticket_role(ctx, tier: str, *, role_input: str):
     valid = ['lowtier', 'midtier', 'hightier', 'support']
-    if tier.lower() not in valid: return await ctx.reply(f'Invalid. Use: {", ".join(valid)}')
+    if tier.lower() not in valid: 
+        return await ctx.reply(f'Invalid tier. Use: {", ".join(valid)}')
+    
+    # Try to convert role_input to a role
+    role = None
+    
+    # Check if it's a role ID (just numbers)
+    if role_input.isdigit():
+        role = ctx.guild.get_role(int(role_input))
+    else:
+        # Try to find role by mention or name
+        try:
+            role = await commands.RoleConverter().convert(ctx, role_input)
+        except:
+            pass
+    
+    if not role:
+        return await ctx.reply('Role not found')
+    
     await db.set_ticket_role(ctx.guild.id, tier.lower(), role.id)
     tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value', 'support': 'Support'}
     embed = discord.Embed(title='Role Set', description=f'{tier_names[tier.lower()]} → {role.mention}', color=0x57F287)
     await ctx.reply(embed=embed)
+    
 
 @bot.command(name='setcolor')
 @commands.has_permissions(administrator=True)
