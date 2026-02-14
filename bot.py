@@ -23,6 +23,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger('TicketBot')
 
 class RateLimiter:
+
+# HARDCODED ROLE IDS
+HARDCODED_ROLES = {
+    'lowtier': 1434610759140118640,
+    'midtier': 1453757157144137911,
+    'hightier': 1453757225267892276,
+    'support': 1432081794647199895
+}
     def __init__(self):
         self.cooldowns = defaultdict(float)
     def check_cooldown(self, user_id: int, command: str, cooldown: int = 3) -> bool:
@@ -208,7 +216,7 @@ async def create_ticket(guild, user, ticket_type, tier=None, trade_details=None)
     channel_name = f'ticket-mm-{user.name}-{ticket_id}' if ticket_type == 'middleman' else f'ticket-{ticket_type}-{user.name}-{ticket_id}'
     overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False), user: discord.PermissionOverwrite(read_messages=True, send_messages=True), guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)}
     if tier:
-        role_id = await db.get_ticket_role(guild.id, tier)
+        role_id = HARDCODED_ROLES.get(tier)
         if role_id:
             role = guild.get_role(role_id)
             if role: overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
@@ -226,7 +234,7 @@ async def create_ticket(guild, user, ticket_type, tier=None, trade_details=None)
     view = TicketControlView()
     ping_msg = user.mention
     if tier:
-        role_id = await db.get_ticket_role(guild.id, tier)
+        role_id = HARDCODED_ROLES.get(tier)
         if role_id:
             tier_role = guild.get_role(role_id)
             if tier_role: ping_msg += f" {tier_role.mention}"
@@ -682,36 +690,15 @@ async def set_proof(ctx, channel: discord.TextChannel):
     embed = discord.Embed(title='Proof Channel Set', description=f'Set to {channel.mention}', color=0x57F287)
     await ctx.reply(embed=embed)
 
-# REPLACE THE TICKETROLE COMMAND IN YOUR bot.py WITH THIS:
-
 @bot.command(name='ticketrole')
 @commands.has_permissions(administrator=True)
-async def ticket_role(ctx, tier: str, *, role_input: str):
+async def ticket_role(ctx, tier: str, role: discord.Role):
     valid = ['lowtier', 'midtier', 'hightier', 'support']
-    if tier.lower() not in valid: 
-        return await ctx.reply(f'Invalid tier. Use: {", ".join(valid)}')
-    
-    # Try to convert role_input to a role
-    role = None
-    
-    # Check if it's a role ID (just numbers)
-    if role_input.isdigit():
-        role = ctx.guild.get_role(int(role_input))
-    else:
-        # Try to find role by mention or name
-        try:
-            role = await commands.RoleConverter().convert(ctx, role_input)
-        except:
-            pass
-    
-    if not role:
-        return await ctx.reply('Role not found')
-    
+    if tier.lower() not in valid: return await ctx.reply(f'Invalid. Use: {", ".join(valid)}')
     await db.set_ticket_role(ctx.guild.id, tier.lower(), role.id)
     tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value', 'support': 'Support'}
     embed = discord.Embed(title='Role Set', description=f'{tier_names[tier.lower()]} → {role.mention}', color=0x57F287)
     await ctx.reply(embed=embed)
-    
 
 @bot.command(name='setcolor')
 @commands.has_permissions(administrator=True)
