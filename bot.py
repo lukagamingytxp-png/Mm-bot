@@ -1,7 +1,3 @@
-# ========================================
-# PART 1/10 - IMPORTS AND UTILITIES
-# ========================================
-
 import discord
 from discord.ext import commands
 from discord.ui import Button, View, Select, Modal, TextInput
@@ -17,20 +13,18 @@ import asyncio
 from collections import defaultdict
 import json
 import io
-import aiohttp
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('TicketBot')
 
-class RateLimiter:
-
-# HARDCODED ROLE IDS
 HARDCODED_ROLES = {
     'lowtier': 1434610759140118640,
     'midtier': 1453757157144137911,
     'hightier': 1453757225267892276,
     'support': 1432081794647199895
 }
+
+class RateLimiter:
     def __init__(self):
         self.cooldowns = defaultdict(float)
     def check_cooldown(self, user_id: int, command: str, cooldown: int = 3) -> bool:
@@ -49,46 +43,6 @@ HARDCODED_ROLES = {
 
 rate_limiter = RateLimiter()
 
-class RobloxAPI:
-    @staticmethod
-    async def get_user_id(username: str) -> Optional[int]:
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post('https://users.roblox.com/v1/usernames/users', json={'usernames': [username], 'excludeBannedUsers': True}) as resp:
-                    data = await resp.json()
-                    if data.get('data'): return data['data'][0]['id']
-            except: pass
-        return None
-    
-    @staticmethod
-    async def get_private_servers(user_id: int) -> Dict[str, str]:
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(f'https://games.roblox.com/v1/users/{user_id}/games') as resp:
-                    data = await resp.json()
-                    ps_links = {}
-                    if data.get('data'):
-                        for game in data['data']:
-                            game_id, game_name = game.get('id'), game.get('name')
-                            try:
-                                async with session.get(f'https://games.roblox.com/v1/games/{game_id}/private-servers') as ps_resp:
-                                    ps_data = await ps_resp.json()
-                                    if ps_data.get('data'):
-                                        for server in ps_data['data']:
-                                            if server.get('vipServerId'):
-                                                link = f"https://www.roblox.com/games/{game['rootPlaceId']}?privateServerLinkCode={server['vipServerId']}"
-                                                ps_links[game_name.lower().replace(' ', '')] = {'name': game_name, 'link': link}
-                                                break
-                            except: continue
-                    return ps_links
-            except: pass
-        return {}
-
-
-# ========================================
-# PART 2/10 - DATABASE CLASS
-# ========================================
-
 class Database:
     def __init__(self):
         self.pool = None
@@ -100,32 +54,20 @@ class Database:
         await self.create_tables()
     async def create_tables(self):
         async with self.pool.acquire() as conn:
-            await conn.execute('CREATE TABLE IF NOT EXISTS config (guild_id BIGINT PRIMARY KEY, ticket_category_id BIGINT, log_channel_id BIGINT, proof_channel_id BIGINT, panel_message_id BIGINT, updated_at TIMESTAMP DEFAULT NOW())')
-            await conn.execute('CREATE TABLE IF NOT EXISTS ticket_roles (guild_id BIGINT, tier TEXT, role_id BIGINT, PRIMARY KEY (guild_id, tier))')
+            await conn.execute('CREATE TABLE IF NOT EXISTS config (guild_id BIGINT PRIMARY KEY, ticket_category_id BIGINT, log_channel_id BIGINT, proof_channel_id BIGINT, updated_at TIMESTAMP DEFAULT NOW())')
             await conn.execute('CREATE TABLE IF NOT EXISTS tier_colors (guild_id BIGINT, tier TEXT, color INT, PRIMARY KEY (guild_id, tier))')
             await conn.execute('CREATE TABLE IF NOT EXISTS tickets (ticket_id TEXT PRIMARY KEY, guild_id BIGINT, channel_id BIGINT, user_id BIGINT, ticket_type TEXT, tier TEXT, claimed_by BIGINT, status TEXT DEFAULT \'open\', trade_details JSONB, created_at TIMESTAMP DEFAULT NOW(), closed_at TIMESTAMP)')
             await conn.execute('CREATE TABLE IF NOT EXISTS stats (user_id BIGINT PRIMARY KEY, tickets_claimed INT DEFAULT 0, tickets_closed INT DEFAULT 0)')
             await conn.execute('CREATE TABLE IF NOT EXISTS ratings (id SERIAL PRIMARY KEY, rated_user_id BIGINT, rater_user_id BIGINT, stars INT, created_at TIMESTAMP DEFAULT NOW(), UNIQUE(rated_user_id, rater_user_id))')
             await conn.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id BIGINT PRIMARY KEY, guild_id BIGINT, reason TEXT, blacklisted_by BIGINT, blacklisted_at TIMESTAMP DEFAULT NOW())')
-            await conn.execute('CREATE TABLE IF NOT EXISTS ps_links (user_id BIGINT, game_key TEXT, game_name TEXT, link TEXT, roblox_username TEXT, last_updated TIMESTAMP DEFAULT NOW(), PRIMARY KEY (user_id, game_key))')
+            await conn.execute('CREATE TABLE IF NOT EXISTS ps_links (user_id BIGINT PRIMARY KEY, link TEXT, last_updated TIMESTAMP DEFAULT NOW())')
     async def get_config(self, guild_id: int) -> Optional[Dict]:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow('SELECT * FROM config WHERE guild_id = $1', guild_id)
             return dict(row) if row else None
     async def set_config(self, guild_id: int, **kwargs):
         async with self.pool.acquire() as conn:
-            await conn.execute('INSERT INTO config (guild_id, ticket_category_id, log_channel_id, proof_channel_id, panel_message_id, updated_at) VALUES ($1, $2, $3, $4, $5, NOW()) ON CONFLICT (guild_id) DO UPDATE SET ticket_category_id = COALESCE($2, config.ticket_category_id), log_channel_id = COALESCE($3, config.log_channel_id), proof_channel_id = COALESCE($4, config.proof_channel_id), panel_message_id = COALESCE($5, config.panel_message_id), updated_at = NOW()', guild_id, kwargs.get('ticket_category_id'), kwargs.get('log_channel_id'), kwargs.get('proof_channel_id'), kwargs.get('panel_message_id'))
-    async def set_ticket_role(self, guild_id: int, tier: str, role_id: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute('INSERT INTO ticket_roles (guild_id, tier, role_id) VALUES ($1, $2, $3) ON CONFLICT (guild_id, tier) DO UPDATE SET role_id = $3', guild_id, tier, role_id)
-    async def get_ticket_role(self, guild_id: int, tier: str) -> Optional[int]:
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('SELECT role_id FROM ticket_roles WHERE guild_id = $1 AND tier = $2', guild_id, tier)
-            return row['role_id'] if row else None
-    async def get_all_ticket_roles(self, guild_id: int) -> List[Dict]:
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch('SELECT tier, role_id FROM ticket_roles WHERE guild_id = $1', guild_id)
-            return [dict(row) for row in rows]
+            await conn.execute('INSERT INTO config (guild_id, ticket_category_id, log_channel_id, proof_channel_id, updated_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (guild_id) DO UPDATE SET ticket_category_id = COALESCE($2, config.ticket_category_id), log_channel_id = COALESCE($3, config.log_channel_id), proof_channel_id = COALESCE($4, config.proof_channel_id), updated_at = NOW()', guild_id, kwargs.get('ticket_category_id'), kwargs.get('log_channel_id'), kwargs.get('proof_channel_id'))
     async def set_tier_color(self, guild_id: int, tier: str, color: int):
         async with self.pool.acquire() as conn:
             await conn.execute('INSERT INTO tier_colors (guild_id, tier, color) VALUES ($1, $2, $3) ON CONFLICT (guild_id, tier) DO UPDATE SET color = $3', guild_id, tier, color)
@@ -177,30 +119,10 @@ class Database:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow('SELECT * FROM blacklist WHERE user_id = $1 AND guild_id = $2', user_id, guild_id)
             return dict(row) if row else None
-    async def save_ps_links(self, user_id: int, roblox_username: str, ps_links: Dict[str, Dict]):
-        async with self.pool.acquire() as conn:
-            await conn.execute('DELETE FROM ps_links WHERE user_id = $1', user_id)
-            for game_key, data in ps_links.items():
-                await conn.execute('INSERT INTO ps_links (user_id, game_key, game_name, link, roblox_username, last_updated) VALUES ($1, $2, $3, $4, $5, NOW())', user_id, game_key, data['name'], data['link'], roblox_username)
-    async def get_ps_links(self, user_id: int) -> List[Dict]:
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch('SELECT * FROM ps_links WHERE user_id = $1', user_id)
-            return [dict(row) for row in rows]
-    async def get_ps_link(self, user_id: int, game_key: str) -> Optional[str]:
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('SELECT link FROM ps_links WHERE user_id = $1 AND game_key = $2', user_id, game_key)
-            return row['link'] if row else None
-    async def remove_ps_link(self, user_id: int, game_key: str):
-        async with self.pool.acquire() as conn:
-            await conn.execute('DELETE FROM ps_links WHERE user_id = $1 AND game_key = $2', user_id, game_key)
     async def close(self):
         if self.pool: await self.pool.close()
 
 db = Database()
-
-# ========================================
-# PART 3/10 - TICKET UTILITY FUNCTIONS
-# ========================================
 
 async def generate_ticket_id():
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
@@ -217,6 +139,11 @@ async def create_ticket(guild, user, ticket_type, tier=None, trade_details=None)
     overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False), user: discord.PermissionOverwrite(read_messages=True, send_messages=True), guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)}
     if tier:
         role_id = HARDCODED_ROLES.get(tier)
+        if role_id:
+            role = guild.get_role(role_id)
+            if role: overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    elif ticket_type == 'support':
+        role_id = HARDCODED_ROLES.get('support')
         if role_id:
             role = guild.get_role(role_id)
             if role: overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
@@ -238,7 +165,30 @@ async def create_ticket(guild, user, ticket_type, tier=None, trade_details=None)
         if role_id:
             tier_role = guild.get_role(role_id)
             if tier_role: ping_msg += f" {tier_role.mention}"
+    elif ticket_type == 'support':
+        role_id = HARDCODED_ROLES.get('support')
+        if role_id:
+            support_role = guild.get_role(role_id)
+            if support_role: ping_msg += f" {support_role.mention}"
     await channel.send(content=ping_msg, embed=embed, view=view)
+    config = await db.get_config(guild.id)
+    if config and config.get('log_channel_id'):
+        log_channel = guild.get_channel(config['log_channel_id'])
+        if log_channel:
+            log_embed = discord.Embed(title='Ticket Opened', color=0x57F287)
+            log_embed.add_field(name='ID', value=f"`{ticket_id}`", inline=True)
+            log_embed.add_field(name='Type', value=ticket_type.title(), inline=True)
+            log_embed.add_field(name='User', value=user.mention, inline=True)
+            log_embed.add_field(name='Channel', value=channel.mention, inline=True)
+            if tier:
+                tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value'}
+                log_embed.add_field(name='Tier', value=tier_names.get(tier, tier), inline=True)
+            if trade_details:
+                trade_text = f"**Trading with:** {trade_details.get('trader', 'N/A')}\n**Giving:** {trade_details.get('giving', 'N/A')}\n**Receiving:** {trade_details.get('receiving', 'N/A')}"
+                if trade_details.get('tip') and trade_details['tip'].lower() != 'none':
+                    trade_text += f"\n**Tip:** {trade_details['tip']}"
+                log_embed.add_field(name='Trade Details', value=trade_text, inline=False)
+            await log_channel.send(embed=log_embed)
     return channel
 
 async def close_ticket(channel, closed_by):
@@ -281,6 +231,13 @@ async def claim_ticket(channel, claimer):
     await db.claim_ticket(ticket['ticket_id'], claimer.id)
     embed = discord.Embed(title='Claimed', description=f'By {claimer.mention}', color=0x57F287)
     await channel.send(embed=embed)
+    config = await db.get_config(channel.guild.id)
+    if config and config.get('log_channel_id'):
+        log_channel = channel.guild.get_channel(config['log_channel_id'])
+        if log_channel:
+            log_embed = discord.Embed(title='Ticket Claimed', description=f"{claimer.mention} claimed {channel.mention}", color=0x57F287)
+            log_embed.add_field(name='ID', value=f"`{ticket['ticket_id']}`", inline=True)
+            await log_channel.send(embed=log_embed)
 
 async def unclaim_ticket(channel):
     tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', channel.id)
@@ -303,12 +260,6 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     logger.info(f'Server started on {port}')
-
-
-
-# ========================================
-# PART 4/10 - BOT SETUP AND MODALS
-# ========================================
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -355,12 +306,6 @@ class MiddlemanModal(Modal, title='Middleman Request'):
             await self.interaction_msg.edit(embed=embed, view=None)
         except Exception as e:
             await interaction.followup.send(f'{str(e)}', ephemeral=True)
-
-
-
-# ========================================
-# PART 5/10 - VIEWS AND DROPDOWNS
-# ========================================
 
 class MiddlemanTierSelect(Select):
     def __init__(self, interaction_msg):
@@ -447,12 +392,6 @@ class TicketControlView(View):
             await close_ticket(interaction.channel, interaction.user)
         except Exception as e:
             await interaction.followup.send(f'{str(e)}', ephemeral=True)
-
-
-
-# ========================================
-# PART 6/10 - TICKET COMMANDS
-# ========================================
 
 @bot.command(name='close')
 async def close_cmd(ctx):
@@ -563,13 +502,6 @@ async def proof_command(ctx):
     await proof_channel.send(embed=embed)
     await ctx.reply('Proof sent')
 
-
-
-
-# ========================================
-# PART 7/10 - RATING AND PS COMMANDS
-# ========================================
-
 @bot.command(name='rateme')
 async def rate_user(ctx, member: discord.Member):
     modal = RatingModal(member)
@@ -603,62 +535,23 @@ async def stats(ctx, member: discord.Member = None):
     await ctx.reply(embed=embed)
 
 @bot.command(name='setps')
-async def set_ps(ctx, roblox_username: str):
-    msg = await ctx.reply('Scanning Roblox account...')
-    user_id = await RobloxAPI.get_user_id(roblox_username)
-    if not user_id: return await msg.edit(content='Roblox user not found')
-    ps_links = await RobloxAPI.get_private_servers(user_id)
-    if not ps_links: return await msg.edit(content='No private servers found')
-    await db.save_ps_links(ctx.author.id, roblox_username, ps_links)
-    games_list = '\n'.join([f'• {data["name"]}' for data in ps_links.values()])
-    embed = discord.Embed(title='Private Servers Saved', description=f'Found {len(ps_links)} server(s)\n\n{games_list}', color=0x57F287)
-    await msg.edit(content=None, embed=embed)
-
-@bot.command(name='pslist')
-async def ps_list(ctx):
-    ps_links = await db.get_ps_links(ctx.author.id)
-    if not ps_links: return await ctx.reply('No private servers saved. Use `$setps <username>`')
-    games_list = '\n'.join([f'• {ps["game_name"]} (`{ps["game_key"]}`)' for ps in ps_links])
-    embed = discord.Embed(title='Your Private Servers', description=games_list, color=0x5865F2)
+async def set_ps(ctx, *, link: str):
+    async with db.pool.acquire() as conn:
+        await conn.execute('INSERT INTO ps_links (user_id, link, last_updated) VALUES ($1, $2, NOW()) ON CONFLICT (user_id) DO UPDATE SET link = $2, last_updated = NOW()', ctx.author.id, link)
+    embed = discord.Embed(title='Private Server Saved', description='Your PS link has been saved', color=0x57F287)
     await ctx.reply(embed=embed)
 
 @bot.command(name='ps')
-async def send_ps(ctx, game_key: str = None):
-    if not ctx.channel.name.startswith('ticket-'): return await ctx.reply('Only in ticket channels')
-    ps_links = await db.get_ps_links(ctx.author.id)
-    if not ps_links: return await ctx.reply('No servers saved', ephemeral=True)
-    if not game_key:
-        games = '\n'.join([f'• `{ps["game_key"]}` - {ps["game_name"]}' for ps in ps_links])
-        return await ctx.reply(f'Specify game:\n{games}', ephemeral=True)
-    link = await db.get_ps_link(ctx.author.id, game_key.lower())
-    if not link: return await ctx.reply(f'No PS link for `{game_key}`', ephemeral=True)
-    await ctx.send(f'🔗 Private Server:\n{link}')
-
-@bot.command(name='removeps')
-async def remove_ps(ctx, game_key: str):
-    await db.remove_ps_link(ctx.author.id, game_key.lower())
-    embed = discord.Embed(title='Removed', description=f'Removed `{game_key}`', color=0x57F287)
-    await ctx.reply(embed=embed)
-
-@bot.command(name='updateps')
-async def update_ps(ctx):
-    ps_links = await db.get_ps_links(ctx.author.id)
-    if not ps_links: return await ctx.reply('No PS links. Use `$setps <username>` first')
-    roblox_username = ps_links[0]['roblox_username']
-    msg = await ctx.reply('Updating...')
-    user_id = await RobloxAPI.get_user_id(roblox_username)
-    if not user_id: return await msg.edit(content='Failed to fetch user')
-    new_ps_links = await RobloxAPI.get_private_servers(user_id)
-    if not new_ps_links: return await msg.edit(content='No servers found')
-    await db.save_ps_links(ctx.author.id, roblox_username, new_ps_links)
-    embed = discord.Embed(title='Updated', description=f'Updated {len(new_ps_links)} server(s)', color=0x57F287)
-    await msg.edit(content=None, embed=embed)
-
-
-
-# ========================================
-# PART 8/10 - ADMIN SETUP COMMANDS
-# ========================================
+async def send_ps(ctx):
+    if not ctx.channel.name.startswith('ticket-'): 
+        return await ctx.reply('Only works in ticket channels')
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT link FROM ps_links WHERE user_id = $1', ctx.author.id)
+    if not row:
+        return await ctx.reply('No PS link saved. Use `$setps <link>` first', ephemeral=True)
+    embed = discord.Embed(title='🔗 Private Server', description=f'[Click here to join]({row["link"]})', color=0x5865F2)
+    embed.set_footer(text=f'Provided by {ctx.author.display_name}')
+    await ctx.send(embed=embed)
 
 @bot.command(name='setup')
 @commands.has_permissions(administrator=True)
@@ -690,16 +583,6 @@ async def set_proof(ctx, channel: discord.TextChannel):
     embed = discord.Embed(title='Proof Channel Set', description=f'Set to {channel.mention}', color=0x57F287)
     await ctx.reply(embed=embed)
 
-@bot.command(name='ticketrole')
-@commands.has_permissions(administrator=True)
-async def ticket_role(ctx, tier: str, role: discord.Role):
-    valid = ['lowtier', 'midtier', 'hightier', 'support']
-    if tier.lower() not in valid: return await ctx.reply(f'Invalid. Use: {", ".join(valid)}')
-    await db.set_ticket_role(ctx.guild.id, tier.lower(), role.id)
-    tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value', 'support': 'Support'}
-    embed = discord.Embed(title='Role Set', description=f'{tier_names[tier.lower()]} → {role.mention}', color=0x57F287)
-    await ctx.reply(embed=embed)
-
 @bot.command(name='setcolor')
 @commands.has_permissions(administrator=True)
 async def set_color(ctx, tier: str, color_hex: str):
@@ -719,30 +602,14 @@ async def set_color(ctx, tier: str, color_hex: str):
 @commands.has_permissions(administrator=True)
 async def view_config(ctx):
     config = await db.get_config(ctx.guild.id)
-    roles = await db.get_all_ticket_roles(ctx.guild.id)
     embed = discord.Embed(title='Server Config', color=0x5865F2)
     if config:
         category = ctx.guild.get_channel(config.get('ticket_category_id')) if config.get('ticket_category_id') else None
         log_channel = ctx.guild.get_channel(config.get('log_channel_id')) if config.get('log_channel_id') else None
         proof_channel = ctx.guild.get_channel(config.get('proof_channel_id')) if config.get('proof_channel_id') else None
         embed.add_field(name='Channels', value=f'Category: {category.mention if category else "Not set"}\nLogs: {log_channel.mention if log_channel else "Not set"}\nProof: {proof_channel.mention if proof_channel else "Not set"}', inline=False)
-    if roles:
-        role_text = ""
-        tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value', 'support': 'Support'}
-        for role_data in roles:
-            role = ctx.guild.get_role(role_data['role_id'])
-            tier_name = tier_names.get(role_data['tier'], role_data['tier'])
-            role_text += f"{tier_name}: {role.mention if role else 'Not found'}\n"
-        embed.add_field(name='Roles', value=role_text, inline=False)
+    embed.add_field(name='Roles (Hardcoded)', value='Low: <@&1434610759140118640>\nMid: <@&1453757157144137911>\nHigh: <@&1453757225267892276>\nSupport: <@&1432081794647199895>', inline=False)
     await ctx.reply(embed=embed)
-
-
-
-
-
-# ========================================
-# PART 9/10 - MODERATION & UTILITY
-# ========================================
 
 @bot.command(name='blacklist')
 @commands.has_permissions(administrator=True)
@@ -799,26 +666,49 @@ async def ping(ctx):
 @bot.command(name='help')
 async def help_command(ctx):
     pages = []
-    page1 = discord.Embed(title='Help - Tickets', description='Ticket commands', color=0x5865F2)
-    page1.add_field(name='Commands', value='`$close` `$claim` `$unclaim`\n`$add @user` `$remove @user`\n`$rename <name>` `$confirm`\n`$proof` `$rateme @user`\n`$stats [@user]`', inline=False)
-    page1.set_footer(text='Page 1/4')
+    page1 = discord.Embed(title='Ticket Commands', color=0x5865F2)
+    page1.add_field(name='$close', value='Close ticket\nExample: `$close`', inline=False)
+    page1.add_field(name='$claim', value='Claim ticket\nExample: `$claim`', inline=False)
+    page1.add_field(name='$unclaim', value='Unclaim ticket\nExample: `$unclaim`', inline=False)
+    page1.add_field(name='$add', value='Add user\nExample: `$add @John`', inline=False)
+    page1.add_field(name='$remove', value='Remove user\nExample: `$remove @John`', inline=False)
+    page1.add_field(name='$rename', value='Rename ticket\nExample: `$rename urgent`', inline=False)
+    page1.set_footer(text='Page 1/5')
     pages.append(page1)
-    page2 = discord.Embed(title='Help - PS Links', description='Private server commands', color=0x5865F2)
-    page2.add_field(name='Commands', value='`$setps <username>` - Scan account\n`$pslist` - View links\n`$ps <game>` - Send link\n`$updateps` - Update links\n`$removeps <game>` - Remove', inline=False)
-    page2.set_footer(text='Page 2/4')
+    page2 = discord.Embed(title='More Tickets', color=0x5865F2)
+    page2.add_field(name='$confirm', value='Trade confirmation\nExample: `$confirm`', inline=False)
+    page2.add_field(name='$proof', value='Submit proof\nExample: `$proof`', inline=False)
+    page2.add_field(name='$rateme', value='Rate user\nExample: `$rateme @John`', inline=False)
+    page2.add_field(name='$stats', value='View stats\nExample: `$stats` or `$stats @John`', inline=False)
+    page2.set_footer(text='Page 2/5')
     pages.append(page2)
+    page3 = discord.Embed(title='Private Server', color=0x5865F2)
+    page3.add_field(name='$setps', value='Save PS link\nExample: `$setps https://roblox.com/games/123?code=abc`', inline=False)
+    page3.add_field(name='$ps', value='Send PS link\nExample: `$ps`', inline=False)
+    page3.set_footer(text='Page 3/5')
+    pages.append(page3)
     if ctx.author.guild_permissions.administrator:
-        page3 = discord.Embed(title='Help - Admin', description='Setup commands', color=0x5865F2)
-        page3.add_field(name='Commands', value='`$setup` `$setcategory #cat`\n`$setlogs #ch` `$setproof #ch`\n`$ticketrole <tier> @role`\n`$setcolor <tier> <hex>`\n`$config`', inline=False)
-        page3.set_footer(text='Page 3/4')
-        pages.append(page3)
-        page4 = discord.Embed(title='Help - Moderation', description='Mod commands', color=0x5865F2)
-        page4.add_field(name='Commands', value='`$blacklist @user <reason>`\n`$unblacklist @user`\n`$blacklists` `$clear`', inline=False)
-        page4.set_footer(text='Page 4/4')
+        page4 = discord.Embed(title='Admin Setup', color=0x5865F2)
+        page4.add_field(name='$setup', value='Create panel\nExample: `$setup`', inline=False)
+        page4.add_field(name='$setcategory', value='Set category\nExample: `$setcategory #tickets`', inline=False)
+        page4.add_field(name='$setlogs', value='Set logs\nExample: `$setlogs #logs`', inline=False)
+        page4.add_field(name='$setproof', value='Set proof\nExample: `$setproof #proofs`', inline=False)
+        page4.add_field(name='$setcolor', value='Set color\nExample: `$setcolor lowtier #00FF00`', inline=False)
+        page4.add_field(name='$config', value='View config\nExample: `$config`', inline=False)
+        page4.set_footer(text='Page 4/5')
         pages.append(page4)
+        page5 = discord.Embed(title='Moderation', color=0x5865F2)
+        page5.add_field(name='$blacklist', value='Blacklist\nExample: `$blacklist @Scammer Tried to scam`', inline=False)
+        page5.add_field(name='$unblacklist', value='Unblacklist\nExample: `$unblacklist @John`', inline=False)
+        page5.add_field(name='$blacklists', value='View blacklist\nExample: `$blacklists`', inline=False)
+        page5.add_field(name='$clear', value='Clear bot msgs\nExample: `$clear`', inline=False)
+        page5.add_field(name='$ping', value='Check latency\nExample: `$ping`', inline=False)
+        page5.set_footer(text='Page 5/5')
+        pages.append(page5)
     else:
-        page1.set_footer(text='Page 1/2')
-        page2.set_footer(text='Page 2/2')
+        page1.set_footer(text='Page 1/3')
+        page2.set_footer(text='Page 2/3')
+        page3.set_footer(text='Page 3/3')
     class HelpView(View):
         def __init__(self, pages):
             super().__init__(timeout=60)
@@ -835,11 +725,6 @@ async def help_command(ctx):
             await interaction.response.edit_message(embed=self.pages[self.current_page])
     view = HelpView(pages) if len(pages) > 1 else None
     await ctx.reply(embed=pages[0], view=view)
-
-
-# ========================================
-# PART 10/10 - EVENTS AND MAIN
-# ========================================
 
 @bot.event
 async def on_ready():
