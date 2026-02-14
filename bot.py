@@ -569,8 +569,6 @@ async def remove_ps(ctx, game: str = None):
     embed = discord.Embed(title='Removed', description=f'Removed `{game}`', color=0x57F287)
     await ctx.reply(embed=embed)
 
-
-
 # ========================================
 # PART 6/8 - ADMIN SETUP COMMANDS
 # ========================================
@@ -582,7 +580,10 @@ async def setup_panel(ctx):
     embed.add_field(name='Options', value='🎫 Support\n⚖️ Middleman', inline=False)
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
-    await ctx.message.delete()
+    try:
+        await ctx.message.delete()
+    except:
+        pass
 
 @bot.command(name='setcategory')
 @commands.has_permissions(administrator=True)
@@ -613,12 +614,22 @@ async def set_proof(ctx, channel: discord.TextChannel = None):
 
 @bot.command(name='ticketrole')
 @commands.has_permissions(administrator=True)
-async def ticket_role(ctx, tier: str = None, role: discord.Role = None):
-    if not tier or not role:
+async def ticket_role(ctx, tier: str = None, *, role_input: str = None):
+    if not tier or not role_input:
         return await ctx.reply('❌ Missing arguments\n\nExample: `$ticketrole lowtier @LowValueMM`\n\nValid tiers: lowtier, midtier, hightier, support')
     valid = ['lowtier', 'midtier', 'hightier', 'support']
     if tier.lower() not in valid: 
         return await ctx.reply(f'❌ Invalid tier\n\nValid options: {", ".join(valid)}\n\nExample: `$ticketrole lowtier @LowValueMM`')
+    role = None
+    if role_input.isdigit():
+        role = ctx.guild.get_role(int(role_input))
+    else:
+        try:
+            role = await commands.RoleConverter().convert(ctx, role_input)
+        except:
+            pass
+    if not role:
+        return await ctx.reply(f'❌ Role not found: {role_input}\n\nExample: `$ticketrole lowtier @LowValueMM`')
     await db.set_ticket_role(ctx.guild.id, tier.lower(), role.id)
     tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value', 'support': 'Support'}
     embed = discord.Embed(title='Role Set', description=f'{tier_names[tier.lower()]} → {role.mention}', color=0x57F287)
@@ -662,7 +673,7 @@ async def view_config(ctx):
             role_text += f"{tier_name}: {role.mention if role else 'Not found'}\n"
         embed.add_field(name='Roles', value=role_text, inline=False)
     await ctx.reply(embed=embed)
-
+        
 
 # ========================================
 # PART 7/8 - MODERATION & UTILITY COMMANDS
