@@ -1,647 +1,1502 @@
+"""
+╔══════════════════════════════════════════════════════════════╗
+║           Professional Discord Ticket System Bot              ║
+║         Optimized for Render Free Tier + PostgreSQL          ║
+╔══════════════════════════════════════════════════════════════╗
+"""
+
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ui import Button, View, Select, Modal, TextInput
 import os
 import asyncpg
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiohttp import web
 import logging
 import random
 import string
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 import asyncio
 from collections import defaultdict
 import json
+import sys
 import io
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# ═══════════════════════════════════════════════════════════════
+#                        LOGGING SETUP
+# ═══════════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger('TicketBot')
 
-HARDCODED_ROLES = {
-    'lowtier': 1434610759140118640,
-    'midtier': 1453757157144137911,
-    'hightier': 1453757225267892276,
-    'support': 1432081794647199895
-}
+# ═══════════════════════════════════════════════════════════════
+#                     CONFIGURATION & CONSTANTS
+# ═══════════════════════════════════════════════════════════════
+
+class Config:
+    """Centralized configuration management"""
+    
+    # Role IDs (hardcoded for your server)
+    ROLES = {
+        'lowtier': 1434610759140118640,
+        'midtier': 1453757157144137911,
+        'hightier': 1453757225267892276,
+        'support': 1432081794647199895
+    }
+    
+    # Default embed colors
+    COLORS = {
+        'lowtier': 0x57F287,    # Green
+        'midtier': 0xFEE75C,    # Yellow
+        'hightier': 0xED4245,   # Red
+        'support': 0x5865F2,    # Blurple
+        'success': 0x00D26A,    # Success Green
+        'error': 0xFF4757,      # Error Red
+        'warning': 0xFFB900,    # Warning Orange
+        'info': 0x3498DB,       # Info Blue
+        'primary': 0x5865F2     # Discord Blurple
+    }
+    
+    # Rate limiting
+    RATE_LIMIT_COOLDOWN = 3
+    RATE_LIMIT_CLEANUP_INTERVAL = 300
+    
+    # Ticket settings
+    TICKET_ID_LENGTH = 6
+    MAX_TICKET_NAME_LENGTH = 50
+    
+    # Web server settings
+    WEB_PORT = int(os.getenv('PORT', 8080))
+    
+    # Database settings
+    DB_MIN_CONNECTIONS = 2
+    DB_MAX_CONNECTIONS = 10
+    DB_COMMAND_TIMEOUT = 30
+
+# ═══════════════════════════════════════════════════════════════
+#                       RATE LIMITER
+# ═══════════════════════════════════════════════════════════════
 
 class RateLimiter:
     def __init__(self):
-        self.cooldowns = defaultdict(float)
-    def check_cooldown(self, user_id: int, command: str, cooldown: int = 3) -> bool:
+        self.cooldowns: Dict[str, float] = defaultdict(float)
+    
+    def check_cooldown(self, user_id: int, command: str, cooldown: int = Config.RATE_LIMIT_COOLDOWN) -> bool:
         key = f"{user_id}:{command}"
         now = datetime.utcnow().timestamp()
+        
         if key in self.cooldowns:
-            if now - self.cooldowns[key] < cooldown:
+            time_passed = now - self.cooldowns[key]
+            if time_passed < cooldown:
                 return False
+        
         self.cooldowns[key] = now
         return True
+    
     async def cleanup_old_entries(self):
         while True:
-            await asyncio.sleep(300)
-            now = datetime.utcnow().timestamp()
-            self.cooldowns = {k: v for k, v in self.cooldowns.items() if now - v < 3600}
+            try:
+                await asyncio.sleep(Config.RATE_LIMIT_CLEANUP_INTERVAL)
+                now = datetime.utcnow().timestamp()
+                expired_keys = [k for k, v in self.cooldowns.items() if now - v > 3600]
+                for key in expired_keys:
+                    del self.cooldowns[key]
+                if expired_keys:
+                    logger.debug(f"Cleaned up {len(expired_keys)} expired cooldown entries")
+            except Exception as e:
+                logger.error(f"Error in cooldown cleanup: {e}")
 
 rate_limiter = RateLimiter()
 
+# ═══════════════════════════════════════════════════════════════
+#                     DATABASE MANAGER
+# ═══════════════════════════════════════════════════════════════
+
 class Database:
     def __init__(self):
-        self.pool = None
+        self.pool: Optional[asyncpg.Pool] = None
+    
     async def connect(self):
         database_url = os.getenv('DATABASE_URL')
-        if not database_url: raise Exception("DATABASE_URL not set")
-        if database_url.startswith('postgres://'): database_url = database_url.replace('postgres://', 'postgresql://', 1)
-        self.pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10)
-        await self.create_tables()
+        if not database_url:
+            raise Exception("❌ DATABASE_URL environment variable not set")
+        
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql://', 1)
+        
+        for attempt in range(1, 6):
+            try:
+                logger.info(f"🔌 Connecting to database (attempt {attempt}/5)...")
+                self.pool = await asyncpg.create_pool(
+                    database_url,
+                    min_size=Config.DB_MIN_CONNECTIONS,
+                    max_size=Config.DB_MAX_CONNECTIONS,
+                    command_timeout=Config.DB_COMMAND_TIMEOUT
+                )
+                await self.create_tables()
+                logger.info("✅ Database connected successfully")
+                return
+            except Exception as e:
+                logger.error(f"❌ Database connection failed (attempt {attempt}): {e}")
+                if attempt < 5:
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    raise Exception("Failed to connect to database after multiple attempts")
+    
     async def create_tables(self):
         async with self.pool.acquire() as conn:
-            await conn.execute('CREATE TABLE IF NOT EXISTS config (guild_id BIGINT PRIMARY KEY, ticket_category_id BIGINT, log_channel_id BIGINT, proof_channel_id BIGINT, updated_at TIMESTAMP DEFAULT NOW())')
-            await conn.execute('CREATE TABLE IF NOT EXISTS tier_colors (guild_id BIGINT, tier TEXT, color INT, PRIMARY KEY (guild_id, tier))')
-            await conn.execute('CREATE TABLE IF NOT EXISTS tickets (ticket_id TEXT PRIMARY KEY, guild_id BIGINT, channel_id BIGINT, user_id BIGINT, ticket_type TEXT, tier TEXT, claimed_by BIGINT, status TEXT DEFAULT \'open\', trade_details JSONB, created_at TIMESTAMP DEFAULT NOW(), closed_at TIMESTAMP)')
-            await conn.execute('CREATE TABLE IF NOT EXISTS stats (user_id BIGINT PRIMARY KEY, tickets_claimed INT DEFAULT 0, tickets_closed INT DEFAULT 0)')
-            await conn.execute('CREATE TABLE IF NOT EXISTS ratings (id SERIAL PRIMARY KEY, rated_user_id BIGINT, rater_user_id BIGINT, stars INT, created_at TIMESTAMP DEFAULT NOW(), UNIQUE(rated_user_id, rater_user_id))')
-            await conn.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id BIGINT PRIMARY KEY, guild_id BIGINT, reason TEXT, blacklisted_by BIGINT, blacklisted_at TIMESTAMP DEFAULT NOW())')
-            await conn.execute('CREATE TABLE IF NOT EXISTS ps_links (user_id BIGINT PRIMARY KEY, link TEXT, last_updated TIMESTAMP DEFAULT NOW())')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS config (
+                    guild_id BIGINT PRIMARY KEY,
+                    ticket_category_id BIGINT,
+                    log_channel_id BIGINT,
+                    proof_channel_id BIGINT,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS tier_colors (
+                    guild_id BIGINT,
+                    tier TEXT,
+                    color INT,
+                    PRIMARY KEY (guild_id, tier)
+                )
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS tickets (
+                    ticket_id TEXT PRIMARY KEY,
+                    guild_id BIGINT NOT NULL,
+                    channel_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    ticket_type TEXT NOT NULL,
+                    tier TEXT,
+                    claimed_by BIGINT,
+                    status TEXT DEFAULT 'open',
+                    trade_details JSONB,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    closed_at TIMESTAMP
+                )
+            ''')
+            
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_tickets_guild_status 
+                ON tickets(guild_id, status)
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS stats (
+                    user_id BIGINT PRIMARY KEY,
+                    tickets_claimed INT DEFAULT 0,
+                    tickets_closed INT DEFAULT 0,
+                    last_activity TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS blacklist (
+                    user_id BIGINT PRIMARY KEY,
+                    guild_id BIGINT NOT NULL,
+                    reason TEXT,
+                    blacklisted_by BIGINT,
+                    blacklisted_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS ps_links (
+                    user_id BIGINT,
+                    game_key TEXT,
+                    game_name TEXT,
+                    link TEXT,
+                    roblox_username TEXT,
+                    last_updated TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (user_id, game_key)
+                )
+            ''')
+            
+            logger.info("📊 Database schema initialized")
+    
     async def get_config(self, guild_id: int) -> Optional[Dict]:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow('SELECT * FROM config WHERE guild_id = $1', guild_id)
             return dict(row) if row else None
+    
     async def set_config(self, guild_id: int, **kwargs):
         async with self.pool.acquire() as conn:
-            await conn.execute('INSERT INTO config (guild_id, ticket_category_id, log_channel_id, proof_channel_id, updated_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (guild_id) DO UPDATE SET ticket_category_id = COALESCE($2, config.ticket_category_id), log_channel_id = COALESCE($3, config.log_channel_id), proof_channel_id = COALESCE($4, config.proof_channel_id), updated_at = NOW()', guild_id, kwargs.get('ticket_category_id'), kwargs.get('log_channel_id'), kwargs.get('proof_channel_id'))
+            await conn.execute('''
+                INSERT INTO config (guild_id, ticket_category_id, log_channel_id, proof_channel_id, updated_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                ON CONFLICT (guild_id) DO UPDATE SET
+                    ticket_category_id = COALESCE($2, config.ticket_category_id),
+                    log_channel_id = COALESCE($3, config.log_channel_id),
+                    proof_channel_id = COALESCE($4, config.proof_channel_id),
+                    updated_at = NOW()
+            ''', guild_id, kwargs.get('ticket_category_id'), 
+            kwargs.get('log_channel_id'), kwargs.get('proof_channel_id'))
+    
     async def set_tier_color(self, guild_id: int, tier: str, color: int):
         async with self.pool.acquire() as conn:
-            await conn.execute('INSERT INTO tier_colors (guild_id, tier, color) VALUES ($1, $2, $3) ON CONFLICT (guild_id, tier) DO UPDATE SET color = $3', guild_id, tier, color)
+            await conn.execute('''
+                INSERT INTO tier_colors (guild_id, tier, color)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (guild_id, tier) DO UPDATE SET color = $3
+            ''', guild_id, tier, color)
+    
     async def get_tier_color(self, guild_id: int, tier: str) -> int:
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('SELECT color FROM tier_colors WHERE guild_id = $1 AND tier = $2', guild_id, tier)
-            if row: return row['color']
-            defaults = {'lowtier': 0x57F287, 'midtier': 0xFEE75C, 'hightier': 0xED4245, 'support': 0x5865F2}
-            return defaults.get(tier, 0x5865F2)
-    async def create_ticket(self, ticket_id: str, guild_id: int, channel_id: int, user_id: int, ticket_type: str, tier: str = None, trade_details: Dict = None):
+            row = await conn.fetchrow(
+                'SELECT color FROM tier_colors WHERE guild_id = $1 AND tier = $2',
+                guild_id, tier
+            )
+            if row:
+                return row['color']
+            return Config.COLORS.get(tier, Config.COLORS['primary'])
+    
+    async def create_ticket(self, ticket_id: str, guild_id: int, channel_id: int, 
+                          user_id: int, ticket_type: str, tier: str = None, 
+                          trade_details: Dict = None):
         async with self.pool.acquire() as conn:
             trade_details_json = json.dumps(trade_details) if trade_details else None
-            await conn.execute('INSERT INTO tickets (ticket_id, guild_id, channel_id, user_id, ticket_type, tier, trade_details) VALUES ($1, $2, $3, $4, $5, $6, $7)', ticket_id, guild_id, channel_id, user_id, ticket_type, tier, trade_details_json)
+            await conn.execute('''
+                INSERT INTO tickets (ticket_id, guild_id, channel_id, user_id, 
+                                   ticket_type, tier, trade_details)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ''', ticket_id, guild_id, channel_id, user_id, ticket_type, tier, trade_details_json)
+    
+    async def get_ticket(self, ticket_id: str) -> Optional[Dict]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT * FROM tickets WHERE ticket_id = $1', ticket_id)
+            return dict(row) if row else None
+    
+    async def get_ticket_by_channel(self, channel_id: int) -> Optional[Dict]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT * FROM tickets WHERE channel_id = $1', channel_id)
+            return dict(row) if row else None
+    
     async def claim_ticket(self, ticket_id: str, user_id: int):
         async with self.pool.acquire() as conn:
-            await conn.execute('UPDATE tickets SET claimed_by = $2, status = \'claimed\' WHERE ticket_id = $1', ticket_id, user_id)
-            await conn.execute('INSERT INTO stats (user_id, tickets_claimed) VALUES ($1, 1) ON CONFLICT (user_id) DO UPDATE SET tickets_claimed = stats.tickets_claimed + 1', user_id)
+            await conn.execute('''
+                UPDATE tickets SET claimed_by = $2, status = 'claimed' 
+                WHERE ticket_id = $1
+            ''', ticket_id, user_id)
+            
+            await conn.execute('''
+                INSERT INTO stats (user_id, tickets_claimed, last_activity)
+                VALUES ($1, 1, NOW())
+                ON CONFLICT (user_id) DO UPDATE SET
+                    tickets_claimed = stats.tickets_claimed + 1,
+                    last_activity = NOW()
+            ''', user_id)
+    
     async def unclaim_ticket(self, ticket_id: str):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow('SELECT claimed_by FROM tickets WHERE ticket_id = $1', ticket_id)
+            
             if row and row['claimed_by']:
-                await conn.execute('UPDATE stats SET tickets_claimed = tickets_claimed - 1 WHERE user_id = $1 AND tickets_claimed > 0', row['claimed_by'])
-            await conn.execute('UPDATE tickets SET claimed_by = NULL, status = \'open\' WHERE ticket_id = $1', ticket_id)
+                await conn.execute('''
+                    UPDATE stats SET tickets_claimed = tickets_claimed - 1 
+                    WHERE user_id = $1 AND tickets_claimed > 0
+                ''', row['claimed_by'])
+            
+            await conn.execute('''
+                UPDATE tickets SET claimed_by = NULL, status = 'open' 
+                WHERE ticket_id = $1
+            ''', ticket_id)
+    
     async def close_ticket(self, ticket_id: str):
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow('SELECT claimed_by FROM tickets WHERE ticket_id = $1', ticket_id)
-            await conn.execute('UPDATE tickets SET status = \'closed\', closed_at = NOW() WHERE ticket_id = $1', ticket_id)
+            
+            await conn.execute('''
+                UPDATE tickets SET status = 'closed', closed_at = NOW() 
+                WHERE ticket_id = $1
+            ''', ticket_id)
+            
             if row and row['claimed_by']:
-                await conn.execute('UPDATE stats SET tickets_closed = tickets_closed + 1 WHERE user_id = $1', row['claimed_by'])
+                await conn.execute('''
+                    UPDATE stats SET 
+                        tickets_closed = tickets_closed + 1,
+                        last_activity = NOW()
+                    WHERE user_id = $1
+                ''', row['claimed_by'])
+    
     async def get_user_stats(self, user_id: int) -> Dict:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow('SELECT * FROM stats WHERE user_id = $1', user_id)
-            if row: return dict(row)
+            if row:
+                return dict(row)
             return {'tickets_claimed': 0, 'tickets_closed': 0}
-    async def add_rating(self, rated_user_id: int, rater_user_id: int, stars: int):
+    
+    async def get_leaderboard(self, guild_id: int, limit: int = 10) -> List[Dict]:
         async with self.pool.acquire() as conn:
-            await conn.execute('INSERT INTO ratings (rated_user_id, rater_user_id, stars) VALUES ($1, $2, $3) ON CONFLICT (rated_user_id, rater_user_id) DO UPDATE SET stars = $3, created_at = NOW()', rated_user_id, rater_user_id, stars)
-    async def get_user_ratings(self, user_id: int) -> List[Dict]:
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch('SELECT rater_user_id, stars, created_at FROM ratings WHERE rated_user_id = $1 ORDER BY created_at DESC', user_id)
+            rows = await conn.fetch('''
+                SELECT s.user_id, s.tickets_claimed, s.tickets_closed
+                FROM stats s
+                INNER JOIN tickets t ON s.user_id = t.claimed_by
+                WHERE t.guild_id = $1
+                GROUP BY s.user_id, s.tickets_claimed, s.tickets_closed
+                ORDER BY s.tickets_closed DESC, s.tickets_claimed DESC
+                LIMIT $2
+            ''', guild_id, limit)
             return [dict(row) for row in rows]
+    
     async def blacklist_user(self, user_id: int, guild_id: int, reason: str, blacklisted_by: int):
         async with self.pool.acquire() as conn:
-            await conn.execute('INSERT INTO blacklist (user_id, guild_id, reason, blacklisted_by) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id) DO UPDATE SET reason = $3, blacklisted_by = $4, blacklisted_at = NOW()', user_id, guild_id, reason, blacklisted_by)
+            await conn.execute('''
+                INSERT INTO blacklist (user_id, guild_id, reason, blacklisted_by)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    reason = $3,
+                    blacklisted_by = $4,
+                    blacklisted_at = NOW()
+            ''', user_id, guild_id, reason, blacklisted_by)
+    
     async def unblacklist_user(self, user_id: int):
         async with self.pool.acquire() as conn:
             await conn.execute('DELETE FROM blacklist WHERE user_id = $1', user_id)
+    
     async def is_blacklisted(self, user_id: int, guild_id: int) -> Optional[Dict]:
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow('SELECT * FROM blacklist WHERE user_id = $1 AND guild_id = $2', user_id, guild_id)
+            row = await conn.fetchrow('''
+                SELECT * FROM blacklist 
+                WHERE user_id = $1 AND guild_id = $2
+            ''', user_id, guild_id)
             return dict(row) if row else None
+    
+    async def get_all_blacklisted(self, guild_id: int) -> List[Dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT * FROM blacklist 
+                WHERE guild_id = $1 
+                ORDER BY blacklisted_at DESC
+            ''', guild_id)
+            return [dict(row) for row in rows]
+    
+    async def set_ps_link(self, user_id: int, game_key: str, game_name: str, 
+                         link: str, roblox_username: str = None):
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO ps_links (user_id, game_key, game_name, link, roblox_username, last_updated)
+                VALUES ($1, $2, $3, $4, $5, NOW())
+                ON CONFLICT (user_id, game_key) DO UPDATE SET
+                    game_name = $3,
+                    link = $4,
+                    roblox_username = $5,
+                    last_updated = NOW()
+            ''', user_id, game_key, game_name, link, roblox_username)
+    
+    async def get_ps_link(self, user_id: int, game_key: str) -> Optional[Dict]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT * FROM ps_links 
+                WHERE user_id = $1 AND game_key = $2
+            ''', user_id, game_key)
+            return dict(row) if row else None
+    
+    async def get_all_ps_links(self, user_id: int) -> List[Dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT * FROM ps_links 
+                WHERE user_id = $1 
+                ORDER BY last_updated DESC
+            ''', user_id)
+            return [dict(row) for row in rows]
+    
+    async def delete_ps_link(self, user_id: int, game_key: str):
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                DELETE FROM ps_links 
+                WHERE user_id = $1 AND game_key = $2
+            ''', user_id, game_key)
+    
     async def close(self):
-        if self.pool: await self.pool.close()
+        if self.pool:
+            await self.pool.close()
+            logger.info("🔌 Database connection closed")
 
 db = Database()
 
-async def generate_ticket_id():
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+# ═══════════════════════════════════════════════════════════════
+#                       UTILITY FUNCTIONS
+# ═══════════════════════════════════════════════════════════════
 
-async def create_ticket(guild, user, ticket_type, tier=None, trade_details=None):
-    blacklist_data = await db.is_blacklisted(user.id, guild.id)
-    if blacklist_data: raise Exception(f"Blacklisted: {blacklist_data['reason']}")
-    config = await db.get_config(guild.id)
-    if not config or not config.get('ticket_category_id'): raise Exception('Category not configured')
-    category = guild.get_channel(config['ticket_category_id'])
-    if not category: raise Exception('Category not found')
-    ticket_id = await generate_ticket_id()
-    channel_name = f'ticket-mm-{user.name}-{ticket_id}' if ticket_type == 'middleman' else f'ticket-{ticket_type}-{user.name}-{ticket_id}'
-    overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False), user: discord.PermissionOverwrite(read_messages=True, send_messages=True), guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)}
-    if tier:
-        role_id = HARDCODED_ROLES.get(tier)
-        if role_id:
-            role = guild.get_role(role_id)
-            if role: overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    elif ticket_type == 'support':
-        role_id = HARDCODED_ROLES.get('support')
-        if role_id:
-            role = guild.get_role(role_id)
-            if role: overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    channel = await category.create_text_channel(name=channel_name, overwrites=overwrites)
-    await db.create_ticket(ticket_id, guild.id, channel.id, user.id, ticket_type, tier, trade_details)
-    color = await db.get_tier_color(guild.id, tier if tier else ticket_type)
-    embed = discord.Embed(title=f'{"Middleman" if ticket_type == "middleman" else "Support"} Ticket', description=f'{user.mention}\n\n{"A middleman will assist you shortly" if ticket_type == "middleman" else "Our team will help you shortly"}', color=color)
-    if ticket_type == 'middleman' and trade_details:
-        embed.add_field(name='Trading With', value=trade_details.get('trader', 'N/A'), inline=False)
-        embed.add_field(name='You Give', value=trade_details.get('giving', 'N/A'), inline=True)
-        embed.add_field(name='You Receive', value=trade_details.get('receiving', 'N/A'), inline=True)
-        if trade_details.get('tip') and trade_details['tip'].lower() != 'none':
-            embed.add_field(name='Tip', value=trade_details['tip'], inline=False)
-    embed.set_footer(text=f'Ticket ID: {ticket_id}')
-    view = TicketControlView()
-    ping_msg = user.mention
-    if tier:
-        role_id = HARDCODED_ROLES.get(tier)
-        if role_id:
-            tier_role = guild.get_role(role_id)
-            if tier_role: ping_msg += f" {tier_role.mention}"
-    elif ticket_type == 'support':
-        role_id = HARDCODED_ROLES.get('support')
-        if role_id:
-            support_role = guild.get_role(role_id)
-            if support_role: ping_msg += f" {support_role.mention}"
-    await channel.send(content=ping_msg, embed=embed, view=view)
-    config = await db.get_config(guild.id)
-    if config and config.get('log_channel_id'):
-        log_channel = guild.get_channel(config['log_channel_id'])
-        if log_channel:
-            log_embed = discord.Embed(title='Ticket Opened', color=0x57F287)
-            log_embed.add_field(name='ID', value=f"`{ticket_id}`", inline=True)
-            log_embed.add_field(name='Type', value=ticket_type.title(), inline=True)
-            log_embed.add_field(name='User', value=user.mention, inline=True)
-            log_embed.add_field(name='Channel', value=channel.mention, inline=True)
-            if tier:
-                tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value'}
-                log_embed.add_field(name='Tier', value=tier_names.get(tier, tier), inline=True)
-            if trade_details:
-                trade_text = f"**Trading with:** {trade_details.get('trader', 'N/A')}\n**Giving:** {trade_details.get('giving', 'N/A')}\n**Receiving:** {trade_details.get('receiving', 'N/A')}"
-                if trade_details.get('tip') and trade_details['tip'].lower() != 'none':
-                    trade_text += f"\n**Tip:** {trade_details['tip']}"
-                log_embed.add_field(name='Trade Details', value=trade_text, inline=False)
-            await log_channel.send(embed=log_embed)
-    return channel
+async def generate_ticket_id() -> str:
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=Config.TICKET_ID_LENGTH))
 
-async def close_ticket(channel, closed_by):
-    if not channel.name.startswith('ticket-'): raise Exception('Not a ticket channel')
-    tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1 AND status != $2', channel.id, 'closed')
-    if not tickets: raise Exception('Ticket not found')
-    ticket = dict(tickets[0])
-    await db.close_ticket(ticket['ticket_id'])
-    embed = discord.Embed(title='Closing Ticket', description=f'Closed by {closed_by.mention}\n\nDeleting in 5 seconds', color=0xED4245)
-    await channel.send(embed=embed)
-    config = await db.get_config(channel.guild.id)
-    if config and config.get('log_channel_id'):
-        log_channel = channel.guild.get_channel(config['log_channel_id'])
-        if log_channel:
-            opener = channel.guild.get_member(ticket['user_id'])
-            claimer = channel.guild.get_member(ticket['claimed_by']) if ticket.get('claimed_by') else None
-            transcript = f"TICKET TRANSCRIPT\n{'='*60}\nTicket ID: {ticket['ticket_id']}\nType: {ticket['ticket_type'].title()}\nOpened by: {opener.name if opener else 'Unknown'}\nClaimed by: {claimer.name if claimer else 'Unclaimed'}\nClosed by: {closed_by.name}\nCreated: {ticket['created_at'].strftime('%Y-%m-%d %H:%M:%S')}\n{'='*60}\n\n"
-            messages = []
-            async for msg in channel.history(limit=100, oldest_first=True):
-                timestamp = msg.created_at.strftime('%H:%M:%S')
-                content = msg.content if msg.content else '[No content]'
-                messages.append(f"[{timestamp}] {msg.author.name}: {content}")
-            transcript += '\n'.join(messages)
-            transcript_file = discord.File(fp=io.BytesIO(transcript.encode('utf-8')), filename=f"transcript-{ticket['ticket_id']}.txt")
-            log_embed = discord.Embed(title='Ticket Closed', color=0xED4245)
-            log_embed.add_field(name='ID', value=ticket['ticket_id'], inline=True)
-            log_embed.add_field(name='Type', value=ticket['ticket_type'].title(), inline=True)
-            log_embed.add_field(name='Opened', value=opener.mention if opener else 'Unknown', inline=True)
-            log_embed.add_field(name='Claimed', value=claimer.mention if claimer else 'Unclaimed', inline=True)
-            log_embed.add_field(name='Closed', value=closed_by.mention, inline=True)
-            await log_channel.send(embed=log_embed, file=transcript_file)
-    await asyncio.sleep(5)
-    await channel.delete()
+def create_embed(title: str, description: str = None, color: int = Config.COLORS['primary']) -> discord.Embed:
+    embed = discord.Embed(title=title, description=description, color=color, timestamp=datetime.utcnow())
+    return embed
 
-async def claim_ticket(channel, claimer):
-    tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', channel.id)
-    if not tickets: raise Exception('Ticket not found')
-    ticket = dict(tickets[0])
-    if ticket.get('claimed_by'): raise Exception('Already claimed')
-    await db.claim_ticket(ticket['ticket_id'], claimer.id)
-    embed = discord.Embed(title='Claimed', description=f'By {claimer.mention}', color=0x57F287)
-    await channel.send(embed=embed)
-    config = await db.get_config(channel.guild.id)
-    if config and config.get('log_channel_id'):
-        log_channel = channel.guild.get_channel(config['log_channel_id'])
-        if log_channel:
-            log_embed = discord.Embed(title='Ticket Claimed', description=f"{claimer.mention} claimed {channel.mention}", color=0x57F287)
-            log_embed.add_field(name='ID', value=f"`{ticket['ticket_id']}`", inline=True)
-            await log_channel.send(embed=log_embed)
+def create_success_embed(message: str) -> discord.Embed:
+    return create_embed("✅ Success", message, Config.COLORS['success'])
 
-async def unclaim_ticket(channel):
-    tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', channel.id)
-    if not tickets: raise Exception('Ticket not found')
-    ticket = dict(tickets[0])
-    if not ticket.get('claimed_by'): raise Exception('Not claimed')
-    await db.unclaim_ticket(ticket['ticket_id'])
-    embed = discord.Embed(title='Unclaimed', description='Ticket available', color=0x5865F2)
-    await channel.send(embed=embed)
+def create_error_embed(message: str) -> discord.Embed:
+    return create_embed("❌ Error", message, Config.COLORS['error'])
 
-async def handle_health(request):
-    return web.Response(text='OK', status=200)
+def create_warning_embed(message: str) -> discord.Embed:
+    return create_embed("⚠️ Warning", message, Config.COLORS['warning'])
 
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get('/health', handle_health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv('PORT', 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f'Server started on {port}')
+def create_info_embed(message: str) -> discord.Embed:
+    return create_embed("ℹ️ Information", message, Config.COLORS['info'])
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.guilds = True
-bot = commands.Bot(command_prefix='$', intents=intents, help_command=None)
+def has_staff_role(member: discord.Member) -> bool:
+    """Check if user has any staff role (lowtier, midtier, hightier, support)"""
+    user_roles = [role.id for role in member.roles]
+    allowed_roles = list(Config.ROLES.values())
+    return any(role_id in allowed_roles for role_id in user_roles)
 
-class RatingModal(Modal, title='Rate User'):
-    def __init__(self, rated_user):
-        super().__init__()
-        self.rated_user = rated_user
-        self.stars = TextInput(label='Rating (1-5 stars)', placeholder='1, 2, 3, 4, or 5', required=True, max_length=1)
-        self.add_item(self.stars)
-    async def on_submit(self, interaction):
-        try:
-            rating = int(self.stars.value)
-            if rating < 1 or rating > 5: return await interaction.response.send_message('Must be 1-5', ephemeral=True)
-            if interaction.user.id == self.rated_user.id: return await interaction.response.send_message('Cannot rate yourself', ephemeral=True)
-            await db.add_rating(self.rated_user.id, interaction.user.id, rating)
-            stars = '⭐' * rating
-            embed = discord.Embed(title='Rating Submitted', description=f'Rated {self.rated_user.mention}\n\n{stars}', color=0x57F287)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        except: await interaction.response.send_message('Invalid number', ephemeral=True)
+# ═══════════════════════════════════════════════════════════════
+#                    TICKET CREATION LOGIC
+# ═══════════════════════════════════════════════════════════════
+
+async def create_ticket(guild: discord.Guild, user: discord.Member, 
+                       ticket_type: str, tier: str = None, 
+                       trade_details: Dict = None) -> Optional[discord.TextChannel]:
+    try:
+        # Check blacklist
+        blacklist_data = await db.is_blacklisted(user.id, guild.id)
+        if blacklist_data:
+            raise Exception(f"You are blacklisted: {blacklist_data['reason']}")
+        
+        # Get configuration
+        config = await db.get_config(guild.id)
+        if not config or not config['ticket_category_id']:
+            raise Exception("Ticket system not configured. Contact an administrator.")
+        
+        category = guild.get_channel(config['ticket_category_id'])
+        if not category:
+            raise Exception("Ticket category not found. Contact an administrator.")
+        
+        # Generate ticket ID
+        ticket_id = await generate_ticket_id()
+        
+        # Determine channel name
+        if ticket_type == 'middleman':
+            channel_name = f'ticket-mm-{user.name}-{ticket_id}'
+        else:
+            channel_name = f'ticket-{ticket_type}-{user.name}-{ticket_id}'
+        
+        # Create channel with permissions
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            user: discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                attach_files=True,
+                embed_links=True,
+                read_message_history=True
+            ),
+            guild.me: discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                manage_channels=True,
+                manage_messages=True,
+                embed_links=True,
+                attach_files=True
+            )
+        }
+        
+        # Add tier role permissions for middleman tickets
+        if tier and ticket_type == 'middleman':
+            role_id = Config.ROLES.get(tier)
+            if role_id:
+                role = guild.get_role(role_id)
+                if role:
+                    overwrites[role] = discord.PermissionOverwrite(
+                        read_messages=True,
+                        send_messages=True,
+                        attach_files=True,
+                        embed_links=True,
+                        read_message_history=True
+                    )
+        
+        # Add support role permissions for support tickets
+        if ticket_type == 'support':
+            role_id = Config.ROLES.get('support')
+            if role_id:
+                role = guild.get_role(role_id)
+                if role:
+                    overwrites[role] = discord.PermissionOverwrite(
+                        read_messages=True,
+                        send_messages=True,
+                        attach_files=True,
+                        embed_links=True,
+                        read_message_history=True
+                    )
+        
+        # Create the channel
+        channel = await category.create_text_channel(
+            name=channel_name,
+            overwrites=overwrites,
+            reason=f"Ticket created by {user}"
+        )
+        
+        # Save to database
+        await db.create_ticket(
+            ticket_id=ticket_id,
+            guild_id=guild.id,
+            channel_id=channel.id,
+            user_id=user.id,
+            ticket_type=ticket_type,
+            tier=tier,
+            trade_details=trade_details
+        )
+        
+        # Get embed color
+        color = await db.get_tier_color(guild.id, tier if tier else ticket_type)
+        
+        # Create welcome embed
+        if ticket_type == 'middleman':
+            embed_title = "Middleman Ticket"
+            embed_desc = f"{user.mention}\n\nA middleman will assist you shortly"
+        else:
+            embed_title = "Support Ticket"
+            embed_desc = f"{user.mention}\n\nOur team will help you shortly"
+        
+        embed = discord.Embed(
+            title=embed_title,
+            description=embed_desc,
+            color=color,
+            timestamp=datetime.utcnow()
+        )
+        
+        if ticket_type == 'middleman' and trade_details:
+            embed.add_field(
+                name='Trading With',
+                value=trade_details.get('trader', 'N/A'),
+                inline=False
+            )
+            embed.add_field(
+                name='You Give',
+                value=trade_details.get('giving', 'N/A'),
+                inline=True
+            )
+            embed.add_field(
+                name='You Receive',
+                value=trade_details.get('receiving', 'N/A'),
+                inline=True
+            )
+            if trade_details.get('tip') and trade_details['tip'].lower() != 'none':
+                embed.add_field(
+                    name='Tip',
+                    value=trade_details['tip'],
+                    inline=False
+                )
+        
+        embed.set_footer(text=f'Ticket ID: {ticket_id}')
+        
+        # Prepare ping message
+        ping_msg = user.mention
+        if tier and ticket_type == 'middleman':
+            role_id = Config.ROLES.get(tier)
+            if role_id:
+                tier_role = guild.get_role(role_id)
+                if tier_role:
+                    ping_msg += f" {tier_role.mention}"
+        elif ticket_type == 'support':
+            role_id = Config.ROLES.get('support')
+            if role_id:
+                support_role = guild.get_role(role_id)
+                if support_role:
+                    ping_msg += f" {support_role.mention}"
+        
+        # Send welcome message with control buttons
+        await channel.send(
+            content=ping_msg,
+            embed=embed,
+            view=TicketControlView()
+        )
+        
+        # Log the ticket creation
+        if config and config.get('log_channel_id'):
+            log_channel = guild.get_channel(config['log_channel_id'])
+            if log_channel:
+                log_embed = discord.Embed(title='Ticket Opened', color=0x57F287)
+                log_embed.add_field(name='ID', value=f"`{ticket_id}`", inline=True)
+                log_embed.add_field(name='Type', value=ticket_type.title(), inline=True)
+                log_embed.add_field(name='User', value=user.mention, inline=True)
+                log_embed.add_field(name='Channel', value=channel.mention, inline=True)
+                
+                if tier:
+                    tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value'}
+                    log_embed.add_field(name='Tier', value=tier_names.get(tier, tier), inline=True)
+                
+                if trade_details:
+                    trade_text = f"**Trading with:** {trade_details.get('trader', 'N/A')}\n"
+                    trade_text += f"**Giving:** {trade_details.get('giving', 'N/A')}\n"
+                    trade_text += f"**Receiving:** {trade_details.get('receiving', 'N/A')}"
+                    if trade_details.get('tip') and trade_details['tip'].lower() != 'none':
+                        trade_text += f"\n**Tip:** {trade_details['tip']}"
+                    log_embed.add_field(name='Trade Details', value=trade_text, inline=False)
+                
+                await log_channel.send(embed=log_embed)
+        
+        logger.info(f"✅ Ticket {ticket_id} created by {user} in {guild.name}")
+        return channel
+        
+    except Exception as e:
+        logger.error(f"Error creating ticket: {e}")
+        raise
+
+# ═══════════════════════════════════════════════════════════════
+#                    DISCORD UI COMPONENTS
+# ═══════════════════════════════════════════════════════════════
 
 class MiddlemanModal(Modal, title='Middleman Request'):
     def __init__(self, tier, interaction_msg):
         super().__init__()
-        self.tier, self.interaction_msg = tier, interaction_msg
-        self.trader = TextInput(label='Trading with', placeholder='@username or ID', required=True, max_length=100)
-        self.giving = TextInput(label='You give', placeholder='e.g., 1 garam', style=discord.TextStyle.paragraph, required=True, max_length=500)
-        self.receiving = TextInput(label='You receive', placeholder='e.g., 296 Robux', style=discord.TextStyle.paragraph, required=True, max_length=500)
-        self.tip = TextInput(label='Tip (optional)', placeholder='Optional', required=False, max_length=200)
+        self.tier = tier
+        self.interaction_msg = interaction_msg
+        
+        self.trader = TextInput(
+            label='Trading with',
+            placeholder='@username or ID',
+            required=True,
+            max_length=100
+        )
         self.add_item(self.trader)
+        
+        self.giving = TextInput(
+            label='You give',
+            placeholder='e.g., 1 garam',
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=500
+        )
         self.add_item(self.giving)
+        
+        self.receiving = TextInput(
+            label='You receive',
+            placeholder='e.g., 296 Robux',
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=500
+        )
         self.add_item(self.receiving)
+        
+        self.tip = TextInput(
+            label='Tip (optional)',
+            placeholder='Optional',
+            required=False,
+            max_length=200
+        )
         self.add_item(self.tip)
-    async def on_submit(self, interaction):
+    
+    async def on_submit(self, interaction: discord.Interaction):
         if not rate_limiter.check_cooldown(interaction.user.id, 'ticket_create', 10):
             return await interaction.response.send_message('Wait 10 seconds', ephemeral=True)
+        
         await interaction.response.defer(ephemeral=True)
+        
         try:
-            channel = await create_ticket(interaction.guild, interaction.user, 'middleman', self.tier, {'trader': self.trader.value, 'giving': self.giving.value, 'receiving': self.receiving.value, 'tip': self.tip.value or 'None'})
-            embed = discord.Embed(title='Ticket Created', description=f'{channel.mention}', color=0x57F287)
+            trade_details = {
+                'trader': self.trader.value,
+                'giving': self.giving.value,
+                'receiving': self.receiving.value,
+                'tip': self.tip.value or 'None'
+            }
+            
+            channel = await create_ticket(
+                interaction.guild,
+                interaction.user,
+                'middleman',
+                self.tier,
+                trade_details
+            )
+            
+            # Extract ticket ID from channel name
+            ticket_id = channel.name.split('-')[-1]
+            
+            embed = discord.Embed(
+                title='Ticket Created',
+                description=f'#{ticket_id}\n{channel.mention}',
+                color=0x57F287
+            )
             await self.interaction_msg.edit(embed=embed, view=None)
+            
         except Exception as e:
             await interaction.followup.send(f'{str(e)}', ephemeral=True)
 
 class MiddlemanTierSelect(Select):
     def __init__(self, interaction_msg):
         self.interaction_msg = interaction_msg
-        super().__init__(placeholder='Select trade value', custom_id='mm_tier_select', options=[
-            discord.SelectOption(label='Low Value', value='lowtier', emoji='🟢', description='- Only for low valued stuff'),
-            discord.SelectOption(label='Mid Value', value='midtier', emoji='🟡', description='- Only for mid valued stuff'),
-            discord.SelectOption(label='High Value', value='hightier', emoji='🔴', description='- Only for high valued stuff')
-        ])
+        super().__init__(
+            placeholder='Select trade value',
+            custom_id='mm_tier_select',
+            options=[
+                discord.SelectOption(
+                    label='Low Value',
+                    value='lowtier',
+                    emoji='🟢',
+                    description='- Only for low valued stuff'
+                ),
+                discord.SelectOption(
+                    label='Mid Value',
+                    value='midtier',
+                    emoji='🟡',
+                    description='- Only for mid valued stuff'
+                ),
+                discord.SelectOption(
+                    label='High Value',
+                    value='hightier',
+                    emoji='🔴',
+                    description='- Only for high valued stuff'
+                )
+            ]
+        )
+    
     async def callback(self, interaction):
         modal = MiddlemanModal(self.values[0], self.interaction_msg)
         await interaction.response.send_modal(modal)
 
-class TradeConfirmView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.confirmed = set()
-    @discord.ui.button(label='Confirm Trade', style=discord.ButtonStyle.success, emoji='✅', custom_id='confirm_trade')
-    async def confirm_button(self, interaction, button):
-        self.confirmed.add(interaction.user.id)
-        if len(self.confirmed) >= 2:
-            embed = discord.Embed(title='Trade Confirmed', description='Both parties confirmed\n\nReady to close', color=0x57F287)
-            await interaction.response.edit_message(embed=embed, view=None)
-        else:
-            await interaction.response.send_message(f'✅ Confirmed ({len(self.confirmed)}/2)', ephemeral=True)
-
 class TicketPanelView(View):
+    """Main ticket panel with 2 buttons: Support and Middleman"""
+    
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label='Support', style=discord.ButtonStyle.primary, emoji='🎫', custom_id='support_btn')
-    async def support_button(self, interaction, button):
+    
+    @discord.ui.button(
+        label='Support',
+        style=discord.ButtonStyle.primary,
+        emoji='🎫',
+        custom_id='support_btn'
+    )
+    async def support_button(self, interaction: discord.Interaction, button: Button):
         if not rate_limiter.check_cooldown(interaction.user.id, 'ticket_create', 10):
             return await interaction.response.send_message('Wait 10 seconds', ephemeral=True)
+        
         await interaction.response.defer(ephemeral=True)
+        
         try:
             channel = await create_ticket(interaction.guild, interaction.user, 'support')
-            embed = discord.Embed(title='Ticket Created', description=f'{channel.mention}', color=0x57F287)
+            
+            # Extract ticket ID from channel name
+            ticket_id = channel.name.split('-')[-1]
+            
+            embed = discord.Embed(
+                title='Ticket Created',
+                description=f'#{ticket_id}\n{channel.mention}',
+                color=0x57F287
+            )
             await interaction.followup.send(embed=embed, ephemeral=True)
+            
         except Exception as e:
             await interaction.followup.send(f'{str(e)}', ephemeral=True)
-    @discord.ui.button(label='Middleman', style=discord.ButtonStyle.success, emoji='⚖️', custom_id='middleman_btn')
-    async def middleman_button(self, interaction, button):
-        embed = discord.Embed(title='Select Trade Value', description='Choose tier', color=0xFEE75C)
+    
+    @discord.ui.button(
+        label='Middleman',
+        style=discord.ButtonStyle.success,
+        emoji='⚖️',
+        custom_id='middleman_btn'
+    )
+    async def middleman_button(self, interaction: discord.Interaction, button: Button):
+        embed = discord.Embed(
+            title='Select Trade Value',
+            description='Choose tier',
+            color=0xFEE75C
+        )
+        
         view = View(timeout=300)
         select = MiddlemanTierSelect(None)
         view.add_item(select)
+        
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         msg = await interaction.original_response()
         select.interaction_msg = msg
 
 class TicketControlView(View):
+    """Control buttons for ticket management"""
+    
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label='Claim', style=discord.ButtonStyle.green, custom_id='claim_ticket', emoji='✋')
-    async def claim_button(self, interaction, button):
-        if not rate_limiter.check_cooldown(interaction.user.id, 'claim', 2): return await interaction.response.send_message('Wait', ephemeral=True)
+    
+    @discord.ui.button(
+        label='Claim',
+        style=discord.ButtonStyle.green,
+        custom_id='claim_ticket',
+        emoji='✋'
+    )
+    async def claim_button(self, interaction: discord.Interaction, button: Button):
+        if not rate_limiter.check_cooldown(interaction.user.id, 'claim', 2):
+            return await interaction.response.send_message('Wait', ephemeral=True)
+        
         try:
-            await claim_ticket(interaction.channel, interaction.user)
-            await interaction.response.send_message('Claimed', ephemeral=True)
+            ticket = await db.get_ticket_by_channel(interaction.channel.id)
+            if not ticket:
+                return await interaction.response.send_message('Not a ticket', ephemeral=True)
+            
+            if ticket.get('claimed_by'):
+                return await interaction.response.send_message('Already claimed', ephemeral=True)
+            
+            await db.claim_ticket(ticket['ticket_id'], interaction.user.id)
+            
+            embed = discord.Embed(
+                title='Claimed',
+                description=f'By {interaction.user.mention}',
+                color=0x57F287
+            )
+            await interaction.response.send_message(embed=embed)
+            
+            # Log the claim
+            config = await db.get_config(interaction.guild.id)
+            if config and config.get('log_channel_id'):
+                log_channel = interaction.guild.get_channel(config['log_channel_id'])
+                if log_channel:
+                    log_embed = discord.Embed(
+                        title='Ticket Claimed',
+                        description=f"{interaction.user.mention} claimed {interaction.channel.mention}",
+                        color=0x57F287
+                    )
+                    log_embed.add_field(name='ID', value=f"`{ticket['ticket_id']}`", inline=True)
+                    await log_channel.send(embed=log_embed)
+                    
         except Exception as e:
             await interaction.response.send_message(f'{str(e)}', ephemeral=True)
-    @discord.ui.button(label='Unclaim', style=discord.ButtonStyle.gray, custom_id='unclaim_ticket', emoji='↩️')
-    async def unclaim_button(self, interaction, button):
-        if not rate_limiter.check_cooldown(interaction.user.id, 'unclaim', 2): return await interaction.response.send_message('Wait', ephemeral=True)
-        tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', interaction.channel.id)
-        if not tickets: return await interaction.response.send_message('Not a ticket', ephemeral=True)
-        ticket = dict(tickets[0])
-        if not ticket.get('claimed_by'): return await interaction.response.send_message('Not claimed', ephemeral=True)
-        if ticket['claimed_by'] != interaction.user.id: return await interaction.response.send_message('Only claimer can unclaim', ephemeral=True)
+    
+    @discord.ui.button(
+        label='Unclaim',
+        style=discord.ButtonStyle.gray,
+        custom_id='unclaim_ticket',
+        emoji='↩️'
+    )
+    async def unclaim_button(self, interaction: discord.Interaction, button: Button):
+        if not rate_limiter.check_cooldown(interaction.user.id, 'unclaim', 2):
+            return await interaction.response.send_message('Wait', ephemeral=True)
+        
+        ticket = await db.get_ticket_by_channel(interaction.channel.id)
+        if not ticket:
+            return await interaction.response.send_message('Not a ticket', ephemeral=True)
+        
+        if not ticket.get('claimed_by'):
+            return await interaction.response.send_message('Not claimed', ephemeral=True)
+        
+        # Only claimer can unclaim
+        if ticket['claimed_by'] != interaction.user.id:
+            return await interaction.response.send_message('Only claimer can unclaim', ephemeral=True)
+        
         try:
-            await unclaim_ticket(interaction.channel)
-            await interaction.response.send_message('Unclaimed', ephemeral=True)
+            await db.unclaim_ticket(ticket['ticket_id'])
+            
+            embed = discord.Embed(
+                title='Unclaimed',
+                description='Ticket available',
+                color=0x5865F2
+            )
+            await interaction.response.send_message(embed=embed)
+            
         except Exception as e:
             await interaction.response.send_message(f'{str(e)}', ephemeral=True)
-    @discord.ui.button(label='Close', style=discord.ButtonStyle.red, custom_id='close_ticket', emoji='🔒')
-    async def close_button(self, interaction, button):
-        if not rate_limiter.check_cooldown(interaction.user.id, 'close', 3): return await interaction.response.send_message('Wait', ephemeral=True)
-        tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', interaction.channel.id)
-        if not tickets: return await interaction.response.send_message('Not a ticket', ephemeral=True)
-        ticket = dict(tickets[0])
-        if ticket.get('claimed_by') and ticket['claimed_by'] != interaction.user.id: return await interaction.response.send_message('Only claimer can close', ephemeral=True)
+    
+    @discord.ui.button(
+        label='Close',
+        style=discord.ButtonStyle.red,
+        custom_id='close_ticket',
+        emoji='🔒'
+    )
+    async def close_button(self, interaction: discord.Interaction, button: Button):
+        if not rate_limiter.check_cooldown(interaction.user.id, 'close', 3):
+            return await interaction.response.send_message('Wait', ephemeral=True)
+        
+        ticket = await db.get_ticket_by_channel(interaction.channel.id)
+        if not ticket:
+            return await interaction.response.send_message('Not a ticket', ephemeral=True)
+        
+        # Only claimer can close
+        if ticket.get('claimed_by') and ticket['claimed_by'] != interaction.user.id:
+            return await interaction.response.send_message('Only claimer can close', ephemeral=True)
+        
         await interaction.response.send_message('Closing...', ephemeral=True)
+        
         try:
-            await close_ticket(interaction.channel, interaction.user)
+            await db.close_ticket(ticket['ticket_id'])
+            
+            embed = discord.Embed(
+                title='Closing Ticket',
+                description=f'Closed by {interaction.user.mention}\n\nDeleting in 5 seconds',
+                color=0xED4245
+            )
+            await interaction.channel.send(embed=embed)
+            
+            # Log the closure with transcript
+            config = await db.get_config(interaction.guild.id)
+            if config and config.get('log_channel_id'):
+                log_channel = interaction.guild.get_channel(config['log_channel_id'])
+                if log_channel:
+                    opener = interaction.guild.get_member(ticket['user_id'])
+                    claimer = interaction.guild.get_member(ticket['claimed_by']) if ticket.get('claimed_by') else None
+                    
+                    # Create transcript
+                    transcript = f"TICKET TRANSCRIPT\n{'='*60}\n"
+                    transcript += f"Ticket ID: {ticket['ticket_id']}\n"
+                    transcript += f"Type: {ticket['ticket_type'].title()}\n"
+                    transcript += f"Opened by: {opener.name if opener else 'Unknown'}\n"
+                    transcript += f"Claimed by: {claimer.name if claimer else 'Unclaimed'}\n"
+                    transcript += f"Closed by: {interaction.user.name}\n"
+                    transcript += f"Created: {ticket['created_at'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    transcript += f"{'='*60}\n\n"
+                    
+                    messages = []
+                    async for msg in interaction.channel.history(limit=100, oldest_first=True):
+                        timestamp = msg.created_at.strftime('%H:%M:%S')
+                        content = msg.content if msg.content else '[No content]'
+                        messages.append(f"[{timestamp}] {msg.author.name}: {content}")
+                    transcript += '\n'.join(messages)
+                    
+                    transcript_file = discord.File(
+                        fp=io.BytesIO(transcript.encode('utf-8')),
+                        filename=f"transcript-{ticket['ticket_id']}.txt"
+                    )
+                    
+                    log_embed = discord.Embed(title='Ticket Closed', color=0xED4245)
+                    log_embed.add_field(name='ID', value=ticket['ticket_id'], inline=True)
+                    log_embed.add_field(name='Type', value=ticket['ticket_type'].title(), inline=True)
+                    log_embed.add_field(name='Opened', value=opener.mention if opener else 'Unknown', inline=True)
+                    log_embed.add_field(name='Claimed', value=claimer.mention if claimer else 'Unclaimed', inline=True)
+                    log_embed.add_field(name='Closed', value=interaction.user.mention, inline=True)
+                    
+                    await log_channel.send(embed=log_embed, file=transcript_file)
+            
+            await asyncio.sleep(5)
+            await interaction.channel.delete()
+            
         except Exception as e:
-            await interaction.followup.send(f'{str(e)}', ephemeral=True)
+            logger.error(f"Error closing ticket: {e}")
 
-@bot.command(name='close')
-async def close_cmd(ctx):
-    if not ctx.channel.name.startswith('ticket-'): return await ctx.reply('Not a ticket channel')
-    if not rate_limiter.check_cooldown(ctx.author.id, 'close_cmd', 3): return await ctx.reply('Wait 3 seconds')
-    tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', ctx.channel.id)
-    if not tickets: return await ctx.reply('Ticket not found')
-    ticket = dict(tickets[0])
-    if ticket.get('claimed_by') and ticket['claimed_by'] != ctx.author.id: return await ctx.reply('Only claimer can close')
+# ═══════════════════════════════════════════════════════════════
+#                        BOT INITIALIZATION
+# ═══════════════════════════════════════════════════════════════
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.guilds = True
+
+bot = commands.Bot(
+    command_prefix='$',
+    intents=intents,
+    help_command=None,
+    case_insensitive=True
+)
+
+# ═══════════════════════════════════════════════════════════════
+#                       BOT COMMANDS
+# ═══════════════════════════════════════════════════════════════
+
+@bot.command(name='setup')
+@commands.has_permissions(administrator=True)
+async def setup(ctx):
+    """Create the ticket panel"""
+    embed = discord.Embed(
+        title="🎫 Support Ticket System",
+        description=(
+            "Welcome to our support system! Choose the appropriate button below to create a ticket.\n\n"
+            "**🎧 Support** - For general help and questions\n"
+            "**⚖️ Middleman** - For safe trades (select your tier)\n\n"
+            "Our team will assist you as soon as possible!"
+        ),
+        color=Config.COLORS['primary']
+    )
+    
+    embed.set_thumbnail(url=ctx.guild.icon.url if ctx.guild.icon else None)
+    embed.set_footer(text="Click a button below to get started")
+    
+    await ctx.send(embed=embed, view=TicketPanelView())
+    
     try:
-        await close_ticket(ctx.channel, ctx.author)
-    except Exception as e:
-        await ctx.reply(f'{str(e)}')
+        await ctx.message.delete()
+    except:
+        pass
+
+@bot.command(name='setcategory')
+@commands.has_permissions(administrator=True)
+async def setcategory(ctx, category: discord.CategoryChannel):
+    """Set the category for tickets"""
+    await db.set_config(ctx.guild.id, ticket_category_id=category.id)
+    embed = create_success_embed(f"Ticket category set to: {category.name}")
+    await ctx.reply(embed=embed)
+
+@bot.command(name='setlogs')
+@commands.has_permissions(administrator=True)
+async def setlogs(ctx, channel: discord.TextChannel):
+    """Set the log channel"""
+    await db.set_config(ctx.guild.id, log_channel_id=channel.id)
+    embed = create_success_embed(f"Log channel set to: {channel.mention}")
+    await ctx.reply(embed=embed)
+
+@bot.command(name='setproof')
+@commands.has_permissions(administrator=True)
+async def setproof(ctx, channel: discord.TextChannel):
+    """Set the proof channel"""
+    await db.set_config(ctx.guild.id, proof_channel_id=channel.id)
+    embed = create_success_embed(f"Proof channel set to: {channel.mention}")
+    await ctx.reply(embed=embed)
+
+@bot.command(name='setcolor')
+@commands.has_permissions(administrator=True)
+async def setcolor(ctx, tier: str, color: str):
+    """Set custom color for a tier"""
+    tier = tier.lower()
+    if tier not in ['lowtier', 'midtier', 'hightier', 'support']:
+        embed = create_error_embed("Invalid tier. Use: lowtier, midtier, hightier, or support")
+        return await ctx.reply(embed=embed)
+    
+    try:
+        color_hex = color.replace('#', '')
+        color_int = int(color_hex, 16)
+        
+        await db.set_tier_color(ctx.guild.id, tier, color_int)
+        
+        embed = create_success_embed(f"Color for {tier} set to {color}")
+        embed.color = color_int
+        await ctx.reply(embed=embed)
+        
+    except ValueError:
+        embed = create_error_embed("Invalid color format. Use hex format: #FF0000 or FF0000")
+        await ctx.reply(embed=embed)
+
+@bot.command(name='config')
+@commands.has_permissions(administrator=True)
+async def config(ctx):
+    """View current configuration"""
+    config_data = await db.get_config(ctx.guild.id)
+    
+    embed = discord.Embed(
+        title="⚙️ Server Configuration",
+        color=Config.COLORS['info'],
+        timestamp=datetime.utcnow()
+    )
+    
+    if not config_data:
+        embed.description = "No configuration found. Use `$setup` to get started."
+    else:
+        category = ctx.guild.get_channel(config_data.get('ticket_category_id'))
+        log_channel = ctx.guild.get_channel(config_data.get('log_channel_id'))
+        proof_channel = ctx.guild.get_channel(config_data.get('proof_channel_id'))
+        
+        embed.add_field(
+            name="📁 Ticket Category",
+            value=category.name if category else "Not set",
+            inline=False
+        )
+        embed.add_field(
+            name="📝 Log Channel",
+            value=log_channel.mention if log_channel else "Not set",
+            inline=True
+        )
+        embed.add_field(
+            name="📸 Proof Channel",
+            value=proof_channel.mention if proof_channel else "Not set",
+            inline=True
+        )
+    
+    await ctx.reply(embed=embed)
 
 @bot.command(name='claim')
 async def claim_cmd(ctx):
-    if not ctx.channel.name.startswith('ticket-'): return await ctx.reply('Not a ticket channel')
-    if not rate_limiter.check_cooldown(ctx.author.id, 'claim_cmd', 2): return await ctx.reply('Wait')
+    """Claim a ticket"""
+    if not ctx.channel.name.startswith('ticket-'):
+        return await ctx.reply('Not a ticket channel')
+    
+    if not rate_limiter.check_cooldown(ctx.author.id, 'claim_cmd', 2):
+        return await ctx.reply('Wait')
+    
     try:
-        await claim_ticket(ctx.channel, ctx.author)
+        ticket = await db.get_ticket_by_channel(ctx.channel.id)
+        if not ticket:
+            return await ctx.reply('Ticket not found')
+        
+        if ticket.get('claimed_by'):
+            return await ctx.reply('Already claimed')
+        
+        await db.claim_ticket(ticket['ticket_id'], ctx.author.id)
+        embed = discord.Embed(title='Claimed', description=f'By {ctx.author.mention}', color=0x57F287)
+        await ctx.reply(embed=embed)
+        
     except Exception as e:
         await ctx.reply(f'{str(e)}')
 
 @bot.command(name='unclaim')
 async def unclaim_cmd(ctx):
-    if not ctx.channel.name.startswith('ticket-'): return await ctx.reply('Not a ticket channel')
-    if not rate_limiter.check_cooldown(ctx.author.id, 'unclaim_cmd', 2): return await ctx.reply('Wait')
-    tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', ctx.channel.id)
-    if not tickets: return await ctx.reply('Not found')
-    ticket = dict(tickets[0])
-    if ticket['claimed_by'] != ctx.author.id: return await ctx.reply('Only claimer can unclaim')
+    """Unclaim a ticket - ONLY CLAIMER CAN USE"""
+    if not ctx.channel.name.startswith('ticket-'):
+        return await ctx.reply('Not a ticket channel')
+    
+    if not rate_limiter.check_cooldown(ctx.author.id, 'unclaim_cmd', 2):
+        return await ctx.reply('Wait')
+    
+    ticket = await db.get_ticket_by_channel(ctx.channel.id)
+    if not ticket:
+        return await ctx.reply('Not found')
+    
+    # Only claimer can unclaim
+    if ticket['claimed_by'] != ctx.author.id:
+        return await ctx.reply('Only claimer can unclaim')
+    
     try:
-        await unclaim_ticket(ctx.channel)
+        await db.unclaim_ticket(ticket['ticket_id'])
+        embed = discord.Embed(title='Unclaimed', description='Ticket available', color=0x5865F2)
+        await ctx.reply(embed=embed)
+    except Exception as e:
+        await ctx.reply(f'{str(e)}')
+
+@bot.command(name='close')
+async def close_cmd(ctx):
+    """Close a ticket - ONLY CLAIMER CAN USE"""
+    if not ctx.channel.name.startswith('ticket-'):
+        return await ctx.reply('Not a ticket channel')
+    
+    if not rate_limiter.check_cooldown(ctx.author.id, 'close_cmd', 3):
+        return await ctx.reply('Wait 3 seconds')
+    
+    ticket = await db.get_ticket_by_channel(ctx.channel.id)
+    if not ticket:
+        return await ctx.reply('Ticket not found')
+    
+    # Only claimer can close
+    if ticket.get('claimed_by') and ticket['claimed_by'] != ctx.author.id:
+        return await ctx.reply('Only claimer can close')
+    
+    try:
+        await db.close_ticket(ticket['ticket_id'])
+        
+        embed = discord.Embed(
+            title='Closing Ticket',
+            description=f'Closed by {ctx.author.mention}\n\nDeleting in 5 seconds',
+            color=0xED4245
+        )
+        await ctx.send(embed=embed)
+        
+        # Log with transcript (same as button handler)
+        config = await db.get_config(ctx.guild.id)
+        if config and config.get('log_channel_id'):
+            log_channel = ctx.guild.get_channel(config['log_channel_id'])
+            if log_channel:
+                opener = ctx.guild.get_member(ticket['user_id'])
+                claimer = ctx.guild.get_member(ticket['claimed_by']) if ticket.get('claimed_by') else None
+                
+                transcript = f"TICKET TRANSCRIPT\n{'='*60}\n"
+                transcript += f"Ticket ID: {ticket['ticket_id']}\n"
+                transcript += f"Type: {ticket['ticket_type'].title()}\n"
+                transcript += f"Opened by: {opener.name if opener else 'Unknown'}\n"
+                transcript += f"Claimed by: {claimer.name if claimer else 'Unclaimed'}\n"
+                transcript += f"Closed by: {ctx.author.name}\n"
+                transcript += f"Created: {ticket['created_at'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+                transcript += f"{'='*60}\n\n"
+                
+                messages = []
+                async for msg in ctx.channel.history(limit=100, oldest_first=True):
+                    timestamp = msg.created_at.strftime('%H:%M:%S')
+                    content = msg.content if msg.content else '[No content]'
+                    messages.append(f"[{timestamp}] {msg.author.name}: {content}")
+                transcript += '\n'.join(messages)
+                
+                transcript_file = discord.File(
+                    fp=io.BytesIO(transcript.encode('utf-8')),
+                    filename=f"transcript-{ticket['ticket_id']}.txt"
+                )
+                
+                log_embed = discord.Embed(title='Ticket Closed', color=0xED4245)
+                log_embed.add_field(name='ID', value=ticket['ticket_id'], inline=True)
+                log_embed.add_field(name='Type', value=ticket['ticket_type'].title(), inline=True)
+                log_embed.add_field(name='Opened', value=opener.mention if opener else 'Unknown', inline=True)
+                log_embed.add_field(name='Claimed', value=claimer.mention if claimer else 'Unclaimed', inline=True)
+                log_embed.add_field(name='Closed', value=ctx.author.mention, inline=True)
+                
+                await log_channel.send(embed=log_embed, file=transcript_file)
+        
+        await asyncio.sleep(5)
+        await ctx.channel.delete()
+        
     except Exception as e:
         await ctx.reply(f'{str(e)}')
 
 @bot.command(name='add')
 async def add_user(ctx, member: discord.Member):
-    if not ctx.channel.name.startswith('ticket-'): return await ctx.reply('Not a ticket channel')
-    tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', ctx.channel.id)
-    if not tickets: return await ctx.reply('Ticket not found')
-    ticket = dict(tickets[0])
+    """Add user to ticket - ONLY CLAIMER CAN USE"""
+    if not ctx.channel.name.startswith('ticket-'):
+        return await ctx.reply('Not a ticket channel')
+    
+    ticket = await db.get_ticket_by_channel(ctx.channel.id)
+    if not ticket:
+        return await ctx.reply('Ticket not found')
+    
+    # Only claimer can add users (unless admin)
     if ticket.get('claimed_by') and ticket['claimed_by'] != ctx.author.id and not ctx.author.guild_permissions.administrator:
         return await ctx.reply('Only claimer can add users')
+    
     await ctx.channel.set_permissions(member, read_messages=True, send_messages=True)
     embed = discord.Embed(title='User Added', description=f'{member.mention} added', color=0x57F287)
     await ctx.reply(embed=embed)
 
 @bot.command(name='remove')
 async def remove_user(ctx, member: discord.Member):
-    if not ctx.channel.name.startswith('ticket-'): return await ctx.reply('Not a ticket channel')
-    tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', ctx.channel.id)
-    if not tickets: return await ctx.reply('Ticket not found')
-    ticket = dict(tickets[0])
+    """Remove user from ticket - ONLY CLAIMER CAN USE"""
+    if not ctx.channel.name.startswith('ticket-'):
+        return await ctx.reply('Not a ticket channel')
+    
+    ticket = await db.get_ticket_by_channel(ctx.channel.id)
+    if not ticket:
+        return await ctx.reply('Ticket not found')
+    
+    # Only claimer can remove users (unless admin)
     if ticket.get('claimed_by') and ticket['claimed_by'] != ctx.author.id and not ctx.author.guild_permissions.administrator:
         return await ctx.reply('Only claimer can remove users')
+    
     await ctx.channel.set_permissions(member, overwrite=None)
     embed = discord.Embed(title='User Removed', description=f'{member.mention} removed', color=0xED4245)
     await ctx.reply(embed=embed)
 
 @bot.command(name='rename')
-async def rename_ticket(ctx, *, new_name: str):
-    if not ctx.channel.name.startswith('ticket-'): return await ctx.reply('Not a ticket channel')
-    tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', ctx.channel.id)
-    if not tickets: return await ctx.reply('Ticket not found')
-    ticket = dict(tickets[0])
-    if ticket.get('claimed_by') and ticket['claimed_by'] != ctx.author.id and not ctx.author.guild_permissions.administrator:
-        return await ctx.reply('Only claimer can rename')
-    await ctx.channel.edit(name=f"ticket-{new_name}")
-    embed = discord.Embed(title='Renamed', description=f'Now: `ticket-{new_name}`', color=0x5865F2)
+async def rename(ctx, *, new_name: str):
+    """Rename ticket channel"""
+    if not ctx.channel.name.startswith('ticket-'):
+        return await ctx.reply('Not a ticket channel')
+    
+    # Check if user is staff
+    if not has_staff_role(ctx.author) and not ctx.author.guild_permissions.administrator:
+        return await ctx.reply('Only staff can rename tickets')
+    
+    if len(new_name) > Config.MAX_TICKET_NAME_LENGTH:
+        return await ctx.reply(f'Name too long. Maximum {Config.MAX_TICKET_NAME_LENGTH} characters.')
+    
+    new_name = new_name.lower().replace(' ', '-')
+    new_name = ''.join(c for c in new_name if c.isalnum() or c == '-')
+    
+    await ctx.channel.edit(name=new_name)
+    embed = create_success_embed(f"Channel renamed to: {new_name}")
     await ctx.reply(embed=embed)
-
-@bot.command(name='confirm')
-async def confirm_trade(ctx):
-    if not ctx.channel.name.startswith('ticket-'): return await ctx.reply('Not a ticket channel')
-    embed = discord.Embed(title='Confirm Trade', description='Both parties click below', color=0xFEE75C)
-    view = TradeConfirmView()
-    await ctx.send(embed=embed, view=view)
-
-@bot.command(name='proof')
-async def proof_command(ctx):
-    if not ctx.channel.name.startswith('ticket-'): return await ctx.reply('Only in tickets')
-    tickets = await db.pool.fetch('SELECT * FROM tickets WHERE channel_id = $1', ctx.channel.id)
-    if not tickets: return await ctx.reply('Ticket not found')
-    ticket = dict(tickets[0])
-    config = await db.get_config(ctx.guild.id)
-    if not config or not config.get('proof_channel_id'): return await ctx.reply('Proof channel not configured')
-    proof_channel = ctx.guild.get_channel(config['proof_channel_id'])
-    if not proof_channel: return await ctx.reply('Proof channel not found')
-    opener = ctx.guild.get_member(ticket['user_id'])
-    embed = discord.Embed(title='Trade Completed', color=0x57F287)
-    embed.add_field(name='Middleman', value=ctx.author.mention, inline=False)
-    embed.add_field(name='Type', value='MM', inline=False)
-    if ticket.get('tier'):
-        tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value'}
-        embed.add_field(name='Tier', value=tier_names.get(ticket['tier'], ticket['tier']), inline=False)
-    embed.add_field(name='Requester', value=opener.mention if opener else 'Unknown', inline=False)
-    if ticket.get('trade_details'):
-        try:
-            details = json.loads(ticket['trade_details']) if isinstance(ticket['trade_details'], str) else ticket['trade_details']
-            embed.add_field(name='Trader', value=details.get('trader', 'Unknown'), inline=False)
-            embed.add_field(name='Giving', value=details.get('giving', 'N/A'), inline=True)
-            embed.add_field(name='Receiving', value=details.get('receiving', 'N/A'), inline=True)
-            if details.get('tip') and details['tip'].lower() != 'none':
-                embed.add_field(name='Tip', value=details['tip'], inline=False)
-        except: pass
-    embed.set_footer(text=f'ID: {ticket["ticket_id"]}')
-    await proof_channel.send(embed=embed)
-    await ctx.reply('Proof sent')
-
-@bot.command(name='rateme')
-async def rate_user(ctx, member: discord.Member):
-    modal = RatingModal(member)
-    view = View(timeout=60)
-    button = Button(label=f'Rate {member.display_name}', style=discord.ButtonStyle.primary, emoji='⭐')
-    async def button_callback(interaction):
-        if interaction.user.id != ctx.author.id: return await interaction.response.send_message('Not your button', ephemeral=True)
-        await interaction.response.send_modal(modal)
-    button.callback = button_callback
-    view.add_item(button)
-    embed = discord.Embed(title='Rate User', description=f'Click to rate {member.mention}', color=0xFEE75C)
-    await ctx.reply(embed=embed, view=view)
 
 @bot.command(name='stats')
 async def stats(ctx, member: discord.Member = None):
+    """View user statistics"""
     target = member or ctx.author
-    user_stats = await db.get_user_stats(target.id)
-    ratings = await db.get_user_ratings(target.id)
-    embed = discord.Embed(title=f'{target.display_name}\'s Stats', color=0x5865F2)
-    embed.add_field(name='Tickets', value=f'Claimed: {user_stats["tickets_claimed"]}\nClosed: {user_stats["tickets_closed"]}', inline=False)
-    if ratings:
-        rating_text = ""
-        for rating in ratings:
-            rater = ctx.guild.get_member(rating['rater_user_id'])
-            rater_name = rater.display_name if rater else 'Unknown'
-            stars = '⭐' * rating['stars']
-            rating_text += f"{rater_name} rated {stars}\n"
-        embed.add_field(name=f'Ratings ({len(ratings)})', value=rating_text, inline=False)
-    else:
-        embed.add_field(name='Ratings', value='No ratings yet', inline=False)
+    stats_data = await db.get_user_stats(target.id)
+    
+    embed = discord.Embed(
+        title=f"📊 Statistics for {target.display_name}",
+        color=Config.COLORS['info'],
+        timestamp=datetime.utcnow()
+    )
+    
+    embed.set_thumbnail(url=target.display_avatar.url)
+    
+    embed.add_field(
+        name="🎫 Tickets Claimed",
+        value=f"```{stats_data['tickets_claimed']}```",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="✅ Tickets Closed",
+        value=f"```{stats_data['tickets_closed']}```",
+        inline=True
+    )
+    
+    if stats_data['tickets_claimed'] > 0:
+        success_rate = (stats_data['tickets_closed'] / stats_data['tickets_claimed']) * 100
+        embed.add_field(
+            name="📈 Success Rate",
+            value=f"```{success_rate:.1f}%```",
+            inline=True
+        )
+    
+    embed.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+    
     await ctx.reply(embed=embed)
 
-@bot.command(name='setps')
-async def set_ps(ctx, *, link: str):
-    async with db.pool.acquire() as conn:
-        await conn.execute('INSERT INTO ps_links (user_id, link, last_updated) VALUES ($1, $2, NOW()) ON CONFLICT (user_id) DO UPDATE SET link = $2, last_updated = NOW()', ctx.author.id, link)
-    embed = discord.Embed(title='Private Server Saved', description='Your PS link has been saved', color=0x57F287)
-    await ctx.reply(embed=embed)
-
-@bot.command(name='ps')
-async def send_ps(ctx):
-    if not ctx.channel.name.startswith('ticket-'): 
-        return await ctx.reply('Only works in ticket channels')
-    async with db.pool.acquire() as conn:
-        row = await conn.fetchrow('SELECT link FROM ps_links WHERE user_id = $1', ctx.author.id)
-    if not row:
-        return await ctx.reply('No PS link saved. Use `$setps <link>` first', ephemeral=True)
-    embed = discord.Embed(title='🔗 Private Server', description=f'[Click here to join]({row["link"]})', color=0x5865F2)
-    embed.set_footer(text=f'Provided by {ctx.author.display_name}')
-    await ctx.send(embed=embed)
-
-@bot.command(name='setup')
-@commands.has_permissions(administrator=True)
-async def setup_panel(ctx):
-    embed = discord.Embed(title='Support Tickets', description='Select ticket type below', color=0x5865F2)
-    embed.add_field(name='Options', value='🎫 Support\n⚖️ Middleman', inline=False)
-    view = TicketPanelView()
-    await ctx.send(embed=embed, view=view)
-    await ctx.message.delete()
-
-@bot.command(name='setcategory')
-@commands.has_permissions(administrator=True)
-async def set_category(ctx, category: discord.CategoryChannel):
-    await db.set_config(ctx.guild.id, ticket_category_id=category.id)
-    embed = discord.Embed(title='Category Set', description=f'Set to {category.mention}', color=0x57F287)
-    await ctx.reply(embed=embed)
-
-@bot.command(name='setlogs')
-@commands.has_permissions(administrator=True)
-async def set_logs(ctx, channel: discord.TextChannel):
-    await db.set_config(ctx.guild.id, log_channel_id=channel.id)
-    embed = discord.Embed(title='Log Channel Set', description=f'Set to {channel.mention}', color=0x57F287)
-    await ctx.reply(embed=embed)
-
-@bot.command(name='setproof')
-@commands.has_permissions(administrator=True)
-async def set_proof(ctx, channel: discord.TextChannel):
-    await db.set_config(ctx.guild.id, proof_channel_id=channel.id)
-    embed = discord.Embed(title='Proof Channel Set', description=f'Set to {channel.mention}', color=0x57F287)
-    await ctx.reply(embed=embed)
-
-@bot.command(name='setcolor')
-@commands.has_permissions(administrator=True)
-async def set_color(ctx, tier: str, color_hex: str):
-    valid = ['lowtier', 'midtier', 'hightier', 'support']
-    if tier.lower() not in valid: return await ctx.reply(f'Invalid. Use: {", ".join(valid)}')
-    try:
-        color_hex = color_hex.replace('#', '')
-        color_int = int(color_hex, 16)
-    except:
-        return await ctx.reply('Invalid hex. Use: #RRGGBB')
-    await db.set_tier_color(ctx.guild.id, tier.lower(), color_int)
-    tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value', 'support': 'Support'}
-    embed = discord.Embed(title='Color Set', description=f'{tier_names[tier.lower()]} color updated', color=color_int)
-    await ctx.reply(embed=embed)
-
-@bot.command(name='config')
-@commands.has_permissions(administrator=True)
-async def view_config(ctx):
-    config = await db.get_config(ctx.guild.id)
-    embed = discord.Embed(title='Server Config', color=0x5865F2)
-    if config:
-        category = ctx.guild.get_channel(config.get('ticket_category_id')) if config.get('ticket_category_id') else None
-        log_channel = ctx.guild.get_channel(config.get('log_channel_id')) if config.get('log_channel_id') else None
-        proof_channel = ctx.guild.get_channel(config.get('proof_channel_id')) if config.get('proof_channel_id') else None
-        embed.add_field(name='Channels', value=f'Category: {category.mention if category else "Not set"}\nLogs: {log_channel.mention if log_channel else "Not set"}\nProof: {proof_channel.mention if proof_channel else "Not set"}', inline=False)
-    embed.add_field(name='Roles (Hardcoded)', value='Low: <@&1434610759140118640>\nMid: <@&1453757157144137911>\nHigh: <@&1453757225267892276>\nSupport: <@&1432081794647199895>', inline=False)
+@bot.command(name='leaderboard', aliases=['lb', 'top'])
+async def leaderboard(ctx):
+    """View top performers"""
+    leaders = await db.get_leaderboard(ctx.guild.id, limit=10)
+    
+    if not leaders:
+        embed = create_info_embed("No statistics available yet.")
+        return await ctx.reply(embed=embed)
+    
+    embed = discord.Embed(
+        title="🏆 Leaderboard",
+        description="Top middlemen/support staff",
+        color=Config.COLORS['warning'],
+        timestamp=datetime.utcnow()
+    )
+    
+    for i, leader in enumerate(leaders, 1):
+        member = ctx.guild.get_member(leader['user_id'])
+        if member:
+            embed.add_field(
+                name=f"{i}. {member.display_name}",
+                value=f"Claimed: {leader['tickets_claimed']} | Closed: {leader['tickets_closed']}",
+                inline=False
+            )
+    
     await ctx.reply(embed=embed)
 
 @bot.command(name='blacklist')
 @commands.has_permissions(administrator=True)
-async def blacklist_user(ctx, member: discord.Member, *, reason: str = "No reason"):
+async def blacklist(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    """Blacklist a user"""
     await db.blacklist_user(member.id, ctx.guild.id, reason, ctx.author.id)
-    embed = discord.Embed(title='User Blacklisted', description=f'{member.mention} blocked', color=0xED4245)
-    embed.add_field(name='Reason', value=reason, inline=False)
+    
+    embed = create_success_embed(f"{member.mention} has been blacklisted.\n**Reason:** {reason}")
     await ctx.reply(embed=embed)
+    
+    config = await db.get_config(ctx.guild.id)
+    if config and config.get('log_channel_id'):
+        log_channel = ctx.guild.get_channel(config['log_channel_id'])
+        if log_channel:
+            log_embed = discord.Embed(title="🚫 User Blacklisted", color=Config.COLORS['error'], timestamp=datetime.utcnow())
+            log_embed.add_field(name="User", value=member.mention, inline=True)
+            log_embed.add_field(name="By", value=ctx.author.mention, inline=True)
+            log_embed.add_field(name="Reason", value=reason, inline=False)
+            await log_channel.send(embed=log_embed)
 
 @bot.command(name='unblacklist')
 @commands.has_permissions(administrator=True)
-async def unblacklist_user(ctx, member: discord.Member):
+async def unblacklist(ctx, member: discord.Member):
+    """Remove user from blacklist"""
     await db.unblacklist_user(member.id)
-    embed = discord.Embed(title='User Unblacklisted', description=f'{member.mention} unblocked', color=0x57F287)
+    embed = create_success_embed(f"{member.mention} has been removed from the blacklist.")
     await ctx.reply(embed=embed)
 
 @bot.command(name='blacklists')
 @commands.has_permissions(administrator=True)
-async def view_blacklist(ctx):
-    async with db.pool.acquire() as conn:
-        rows = await conn.fetch('SELECT * FROM blacklist WHERE guild_id = $1', ctx.guild.id)
-    if not rows: return await ctx.reply('No blacklisted users')
-    embed = discord.Embed(title='Blacklisted Users', color=0xED4245)
-    for row in rows:
-        user = ctx.guild.get_member(row['user_id'])
-        username = user.mention if user else f"ID: {row['user_id']}"
-        embed.add_field(name=username, value=f"Reason: {row['reason']}", inline=False)
+async def blacklists(ctx):
+    """View all blacklisted users"""
+    blacklisted = await db.get_all_blacklisted(ctx.guild.id)
+    
+    if not blacklisted:
+        embed = create_info_embed("No blacklisted users.")
+        return await ctx.reply(embed=embed)
+    
+    embed = discord.Embed(
+        title="🚫 Blacklisted Users",
+        color=Config.COLORS['error'],
+        timestamp=datetime.utcnow()
+    )
+    
+    for entry in blacklisted[:10]:
+        member = ctx.guild.get_member(entry['user_id'])
+        name = member.display_name if member else f"User ID: {entry['user_id']}"
+        
+        embed.add_field(
+            name=name,
+            value=f"**Reason:** {entry['reason']}\n**By:** <@{entry['blacklisted_by']}>\n**Date:** {entry['blacklisted_at'].strftime('%Y-%m-%d')}",
+            inline=False
+        )
+    
+    if len(blacklisted) > 10:
+        embed.set_footer(text=f"Showing 10 of {len(blacklisted)} blacklisted users")
+    
+    await ctx.reply(embed=embed)
+
+@bot.command(name='setps')
+async def setps(ctx, game_key: str, link: str, roblox_username: str = None):
+    """Save private server link - ONLY STAFF/MIDDLEMAN"""
+    # Check if user has staff role
+    if not has_staff_role(ctx.author) and not ctx.author.guild_permissions.administrator:
+        embed = create_error_embed("Only middleman/staff can use this command.")
+        return await ctx.reply(embed=embed)
+    
+    if not (link.startswith('http://') or link.startswith('https://')):
+        embed = create_error_embed("Please provide a valid URL starting with http:// or https://")
+        return await ctx.reply(embed=embed)
+    
+    game_name = game_key.replace('_', ' ').title()
+    
+    await db.set_ps_link(ctx.author.id, game_key, game_name, link, roblox_username)
+    
+    embed = create_success_embed(
+        f"Private server link saved!\n**Game:** {game_name}\n**Key:** `{game_key}`"
+    )
+    
+    if roblox_username:
+        embed.add_field(name="Roblox Username", value=roblox_username, inline=False)
+    
+    await ctx.reply(embed=embed)
+
+@bot.command(name='ps')
+async def ps(ctx, game_key: str):
+    """Send private server link - ONLY STAFF/MIDDLEMAN"""
+    # Check if user has staff role
+    if not has_staff_role(ctx.author) and not ctx.author.guild_permissions.administrator:
+        embed = create_error_embed("Only middleman/staff can use this command.")
+        return await ctx.reply(embed=embed)
+    
+    ps_data = await db.get_ps_link(ctx.author.id, game_key)
+    
+    if not ps_data:
+        embed = create_error_embed(
+            f"No private server found for `{game_key}`.\nUse `$setps {game_key} <link>` to add one."
+        )
+        return await ctx.reply(embed=embed)
+    
+    embed = discord.Embed(
+        title=f"🎮 {ps_data['game_name']}",
+        description=f"[Click here to join]({ps_data['link']})",
+        color=Config.COLORS['success'],
+        timestamp=datetime.utcnow()
+    )
+    
+    if ps_data.get('roblox_username'):
+        embed.add_field(name="Roblox Username", value=ps_data['roblox_username'], inline=False)
+    
+    embed.set_footer(text=f"Shared by {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='pslist')
+async def pslist(ctx):
+    """View all your PS links"""
+    ps_links = await db.get_all_ps_links(ctx.author.id)
+    
+    if not ps_links:
+        embed = create_info_embed(
+            "You haven't saved any private server links yet.\nUse `$setps <game> <link>` to add one."
+        )
+        return await ctx.reply(embed=embed)
+    
+    embed = discord.Embed(
+        title=f"🎮 Your Private Servers",
+        color=Config.COLORS['info'],
+        timestamp=datetime.utcnow()
+    )
+    
+    for ps in ps_links[:10]:
+        value = f"**Key:** `{ps['game_key']}`\n"
+        if ps.get('roblox_username'):
+            value += f"**Username:** {ps['roblox_username']}\n"
+        value += f"**Link:** [Click here]({ps['link']})"
+        
+        embed.add_field(name=ps['game_name'], value=value, inline=False)
+    
+    if len(ps_links) > 10:
+        embed.set_footer(text=f"Showing 10 of {len(ps_links)} private servers")
+    
+    await ctx.reply(embed=embed)
+
+@bot.command(name='removeps')
+async def removeps(ctx, game_key: str):
+    """Remove a PS link"""
+    ps_data = await db.get_ps_link(ctx.author.id, game_key)
+    
+    if not ps_data:
+        embed = create_error_embed(f"No private server found for `{game_key}`.")
+        return await ctx.reply(embed=embed)
+    
+    await db.delete_ps_link(ctx.author.id, game_key)
+    embed = create_success_embed(f"Removed private server for **{ps_data['game_name']}**")
     await ctx.reply(embed=embed)
 
 @bot.command(name='clear')
 @commands.has_permissions(manage_messages=True)
-async def clear_bot_messages(ctx):
+async def clear(ctx):
+    """Clear bot messages"""
     deleted = 0
     async for message in ctx.channel.history(limit=100):
         if message.author == bot.user:
@@ -649,126 +1504,255 @@ async def clear_bot_messages(ctx):
                 await message.delete()
                 deleted += 1
                 await asyncio.sleep(0.5)
-            except: pass
-    msg = await ctx.send(f'Deleted {deleted} messages')
+            except:
+                pass
+    
+    embed = create_success_embed(f"Deleted {deleted} bot messages")
+    msg = await ctx.send(embed=embed)
     await asyncio.sleep(3)
     await msg.delete()
     try:
         await ctx.message.delete()
-    except: pass
+    except:
+        pass
 
 @bot.command(name='ping')
 async def ping(ctx):
+    """Check bot latency"""
     latency = round(bot.latency * 1000)
-    embed = discord.Embed(title='Pong', description=f'Latency: {latency}ms', color=0x57F287 if latency < 200 else 0xFEE75C if latency < 500 else 0xED4245)
+    
+    if latency < 200:
+        color = Config.COLORS['success']
+        status = "Excellent"
+    elif latency < 500:
+        color = Config.COLORS['warning']
+        status = "Good"
+    else:
+        color = Config.COLORS['error']
+        status = "Poor"
+    
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        description=f"**Latency:** {latency}ms\n**Status:** {status}",
+        color=color
+    )
+    
     await ctx.reply(embed=embed)
 
 @bot.command(name='help')
 async def help_command(ctx):
+    """Show help menu"""
     pages = []
-    page1 = discord.Embed(title='Ticket Commands', color=0x5865F2)
-    page1.add_field(name='$close', value='Close ticket\nExample: `$close`', inline=False)
-    page1.add_field(name='$claim', value='Claim ticket\nExample: `$claim`', inline=False)
-    page1.add_field(name='$unclaim', value='Unclaim ticket\nExample: `$unclaim`', inline=False)
-    page1.add_field(name='$add', value='Add user\nExample: `$add @John`', inline=False)
-    page1.add_field(name='$remove', value='Remove user\nExample: `$remove @John`', inline=False)
-    page1.add_field(name='$rename', value='Rename ticket\nExample: `$rename urgent`', inline=False)
-    page1.set_footer(text='Page 1/5')
+    
+    page1 = discord.Embed(title="🎫 Ticket Commands", description="Commands for managing tickets", color=Config.COLORS['primary'])
+    page1.add_field(name="$close", value="Close ticket (only claimer)\nUsage: `$close`", inline=False)
+    page1.add_field(name="$claim", value="Claim a ticket\nUsage: `$claim`", inline=False)
+    page1.add_field(name="$unclaim", value="Unclaim ticket (only claimer)\nUsage: `$unclaim`", inline=False)
+    page1.add_field(name="$add", value="Add user to ticket (only claimer)\nUsage: `$add @user`", inline=False)
+    page1.add_field(name="$remove", value="Remove user (only claimer)\nUsage: `$remove @user`", inline=False)
+    page1.add_field(name="$rename", value="Rename ticket (staff only)\nUsage: `$rename <new-name>`", inline=False)
+    page1.set_footer(text="Page 1/5 • Use arrows to navigate")
     pages.append(page1)
-    page2 = discord.Embed(title='More Tickets', color=0x5865F2)
-    page2.add_field(name='$confirm', value='Trade confirmation\nExample: `$confirm`', inline=False)
-    page2.add_field(name='$proof', value='Submit proof\nExample: `$proof`', inline=False)
-    page2.add_field(name='$rateme', value='Rate user\nExample: `$rateme @John`', inline=False)
-    page2.add_field(name='$stats', value='View stats\nExample: `$stats` or `$stats @John`', inline=False)
-    page2.set_footer(text='Page 2/5')
+    
+    page2 = discord.Embed(title="📊 Statistics Commands", description="View statistics", color=Config.COLORS['primary'])
+    page2.add_field(name="$stats", value="View stats\nUsage: `$stats` or `$stats @user`", inline=False)
+    page2.add_field(name="$leaderboard", value="View top performers\nUsage: `$leaderboard` or `$lb`", inline=False)
+    page2.add_field(name="$ping", value="Check bot latency\nUsage: `$ping`", inline=False)
+    page2.set_footer(text="Page 2/5 • Use arrows to navigate")
     pages.append(page2)
-    page3 = discord.Embed(title='Private Server', color=0x5865F2)
-    page3.add_field(name='$setps', value='Save PS link\nExample: `$setps https://roblox.com/games/123?code=abc`', inline=False)
-    page3.add_field(name='$ps', value='Send PS link\nExample: `$ps`', inline=False)
-    page3.set_footer(text='Page 3/5')
+    
+    page3 = discord.Embed(title="🎮 Private Server Commands", description="For middlemen/staff only", color=Config.COLORS['primary'])
+    page3.add_field(name="$setps", value="Save PS link (staff only)\nUsage: `$setps <game> <link> [username]`", inline=False)
+    page3.add_field(name="$ps", value="Send PS link (staff only)\nUsage: `$ps <game>`", inline=False)
+    page3.add_field(name="$pslist", value="View all your PS links\nUsage: `$pslist`", inline=False)
+    page3.add_field(name="$removeps", value="Remove a PS link\nUsage: `$removeps <game>`", inline=False)
+    page3.set_footer(text="Page 3/5 • Use arrows to navigate")
     pages.append(page3)
+    
     if ctx.author.guild_permissions.administrator:
-        page4 = discord.Embed(title='Admin Setup', color=0x5865F2)
-        page4.add_field(name='$setup', value='Create panel\nExample: `$setup`', inline=False)
-        page4.add_field(name='$setcategory', value='Set category\nExample: `$setcategory #tickets`', inline=False)
-        page4.add_field(name='$setlogs', value='Set logs\nExample: `$setlogs #logs`', inline=False)
-        page4.add_field(name='$setproof', value='Set proof\nExample: `$setproof #proofs`', inline=False)
-        page4.add_field(name='$setcolor', value='Set color\nExample: `$setcolor lowtier #00FF00`', inline=False)
-        page4.add_field(name='$config', value='View config\nExample: `$config`', inline=False)
-        page4.set_footer(text='Page 4/5')
+        page4 = discord.Embed(title="⚙️ Admin Setup", description="Server configuration", color=Config.COLORS['primary'])
+        page4.add_field(name="$setup", value="Create ticket panel\nUsage: `$setup`", inline=False)
+        page4.add_field(name="$setcategory", value="Set ticket category\nUsage: `$setcategory <category>`", inline=False)
+        page4.add_field(name="$setlogs", value="Set log channel\nUsage: `$setlogs #channel`", inline=False)
+        page4.add_field(name="$setproof", value="Set proof channel\nUsage: `$setproof #channel`", inline=False)
+        page4.add_field(name="$setcolor", value="Set tier color\nUsage: `$setcolor <tier> #hexcolor`", inline=False)
+        page4.add_field(name="$config", value="View configuration\nUsage: `$config`", inline=False)
+        page4.set_footer(text="Page 4/5 • Use arrows to navigate")
         pages.append(page4)
-        page5 = discord.Embed(title='Moderation', color=0x5865F2)
-        page5.add_field(name='$blacklist', value='Blacklist\nExample: `$blacklist @Scammer Tried to scam`', inline=False)
-        page5.add_field(name='$unblacklist', value='Unblacklist\nExample: `$unblacklist @John`', inline=False)
-        page5.add_field(name='$blacklists', value='View blacklist\nExample: `$blacklists`', inline=False)
-        page5.add_field(name='$clear', value='Clear bot msgs\nExample: `$clear`', inline=False)
-        page5.add_field(name='$ping', value='Check latency\nExample: `$ping`', inline=False)
-        page5.set_footer(text='Page 5/5')
+        
+        page5 = discord.Embed(title="🛡️ Moderation", description="User management", color=Config.COLORS['primary'])
+        page5.add_field(name="$blacklist", value="Blacklist user\nUsage: `$blacklist @user <reason>`", inline=False)
+        page5.add_field(name="$unblacklist", value="Remove from blacklist\nUsage: `$unblacklist @user`", inline=False)
+        page5.add_field(name="$blacklists", value="View blacklisted users\nUsage: `$blacklists`", inline=False)
+        page5.add_field(name="$clear", value="Clear bot messages\nUsage: `$clear`", inline=False)
+        page5.set_footer(text="Page 5/5 • Use arrows to navigate")
         pages.append(page5)
     else:
-        page1.set_footer(text='Page 1/3')
-        page2.set_footer(text='Page 2/3')
-        page3.set_footer(text='Page 3/3')
+        page1.set_footer(text="Page 1/3 • Use arrows to navigate")
+        page2.set_footer(text="Page 2/3 • Use arrows to navigate")
+        page3.set_footer(text="Page 3/3 • Use arrows to navigate")
+    
     class HelpView(View):
         def __init__(self, pages):
             super().__init__(timeout=60)
-            self.pages, self.current_page = pages, 0
+            self.pages = pages
+            self.current_page = 0
+            self.message = None
+        
         @discord.ui.button(emoji='◀️', style=discord.ButtonStyle.gray)
-        async def prev_button(self, interaction, button):
-            if interaction.user.id != ctx.author.id: return await interaction.response.send_message('Not your menu', ephemeral=True)
+        async def prev_button(self, interaction: discord.Interaction, button: Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(embed=create_error_embed("This is not your help menu."), ephemeral=True)
             self.current_page = (self.current_page - 1) % len(self.pages)
             await interaction.response.edit_message(embed=self.pages[self.current_page])
+        
         @discord.ui.button(emoji='▶️', style=discord.ButtonStyle.gray)
-        async def next_button(self, interaction, button):
-            if interaction.user.id != ctx.author.id: return await interaction.response.send_message('Not your menu', ephemeral=True)
+        async def next_button(self, interaction: discord.Interaction, button: Button):
+            if interaction.user.id != ctx.author.id:
+                return await interaction.response.send_message(embed=create_error_embed("This is not your help menu."), ephemeral=True)
             self.current_page = (self.current_page + 1) % len(self.pages)
             await interaction.response.edit_message(embed=self.pages[self.current_page])
+        
+        async def on_timeout(self):
+            for child in self.children:
+                child.disabled = True
+            if self.message:
+                try:
+                    await self.message.edit(view=self)
+                except:
+                    pass
+    
     view = HelpView(pages) if len(pages) > 1 else None
-    await ctx.reply(embed=pages[0], view=view)
+    message = await ctx.reply(embed=pages[0], view=view)
+    if view:
+        view.message = message
+
+# ═══════════════════════════════════════════════════════════════
+#                    WEB SERVER FOR RENDER
+# ═══════════════════════════════════════════════════════════════
+
+async def start_web_server():
+    """Web server for Render health checks"""
+    app = web.Application()
+    
+    async def health_check(request):
+        return web.json_response({
+            'status': 'healthy',
+            'bot': bot.user.name if bot.user else 'Not ready',
+            'guilds': len(bot.guilds),
+            'latency': f"{round(bot.latency * 1000)}ms",
+            'uptime': str(datetime.utcnow() - bot._start_time) if hasattr(bot, '_start_time') else 'N/A'
+        })
+    
+    async def root(request):
+        return web.Response(text=f"🤖 {bot.user.name if bot.user else 'Discord Bot'} is running!")
+    
+    app.router.add_get('/', root)
+    app.router.add_get('/health', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', Config.WEB_PORT)
+    await site.start()
+    
+    logger.info(f"🌐 Web server started on port {Config.WEB_PORT}")
+
+# ═══════════════════════════════════════════════════════════════
+#                        EVENT HANDLERS
+# ═══════════════════════════════════════════════════════════════
 
 @bot.event
 async def on_ready():
-    logger.info(f'Logged in as {bot.user}')
+    bot._start_time = datetime.utcnow()
+    
+    logger.info("━" * 60)
+    logger.info(f"✅ Bot logged in as {bot.user.name} (ID: {bot.user.id})")
+    logger.info(f"📊 Connected to {len(bot.guilds)} guild(s)")
+    logger.info(f"👥 Serving {sum(g.member_count for g in bot.guilds)} users")
+    logger.info("━" * 60)
+    
     try:
         await db.connect()
-        logger.info('Database connected')
     except Exception as e:
-        logger.error(f'Database error: {e}')
-        return
+        logger.critical(f"Failed to connect to database: {e}")
+        await bot.close()
+        sys.exit(1)
+    
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
+    
     bot.loop.create_task(rate_limiter.cleanup_old_entries())
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name='tickets'))
-    logger.info('Bot ready')
+    
+    await bot.change_presence(
+        activity=discord.Activity(type=discord.ActivityType.watching, name="tickets | $help"),
+        status=discord.Status.online
+    )
+    
+    logger.info("✅ Bot is fully ready and operational!")
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    logger.info(f"📥 Joined new guild: {guild.name} (ID: {guild.id})")
+
+@bot.event
+async def on_guild_remove(guild: discord.Guild):
+    logger.info(f"📤 Left guild: {guild.name} (ID: {guild.id})")
 
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        await ctx.reply('No permission')
+        embed = create_error_embed("You don't have permission to use this command.")
     elif isinstance(error, commands.MemberNotFound):
-        await ctx.reply('Member not found')
+        embed = create_error_embed("Member not found. Please mention a valid member.")
     elif isinstance(error, commands.ChannelNotFound):
-        await ctx.reply('Channel not found')
+        embed = create_error_embed("Channel not found. Please provide a valid channel.")
     elif isinstance(error, commands.RoleNotFound):
-        await ctx.reply('Role not found')
+        embed = create_error_embed("Role not found. Please provide a valid role.")
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.reply(f'Missing: {error.param.name}')
+        embed = create_error_embed(f"Missing required argument: `{error.param.name}`")
+    elif isinstance(error, commands.CommandNotFound):
+        return
+    elif isinstance(error, commands.CommandOnCooldown):
+        embed = create_warning_embed(f"This command is on cooldown. Try again in {error.retry_after:.1f}s")
     else:
-        logger.error(f'Error: {error}')
+        embed = create_error_embed("An error occurred while processing your command.")
+        logger.error(f"Command error in {ctx.command}: {error}")
+    
+    try:
+        await ctx.reply(embed=embed)
+    except:
+        pass
+
+# ═══════════════════════════════════════════════════════════════
+#                        MAIN ENTRY POINT
+# ═══════════════════════════════════════════════════════════════
 
 async def main():
+    logger.info("=" * 60)
+    logger.info("      🚀 Starting Discord Ticket Bot")
+    logger.info("=" * 60)
+    
     await start_web_server()
+    
     token = os.getenv('DISCORD_TOKEN')
     if not token:
-        logger.error('DISCORD_TOKEN not found')
-        return
+        logger.critical("❌ DISCORD_TOKEN environment variable not found!")
+        sys.exit(1)
+    
     try:
         await bot.start(token)
     except KeyboardInterrupt:
-        logger.info('Shutting down')
+        logger.info("🛑 Received keyboard interrupt")
+    except Exception as e:
+        logger.critical(f"❌ Fatal error: {e}")
     finally:
+        logger.info("🔄 Shutting down gracefully...")
         await db.close()
         await bot.close()
+        logger.info("👋 Goodbye!")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
