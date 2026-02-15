@@ -564,20 +564,24 @@ async def removeps_cmd(ctx, game: str = None):
 @bot.command(name='setup')
 @commands.has_permissions(administrator=True)
 async def setup_cmd(ctx):
-    embed = discord.Embed(title='🎫 Support Tickets', description='
-🎟️ Ticket Center | Support & Middleman
-  
-  🛠️ Support
-    • General server support
-    • Claiming giveaway or event prizes
-    • Partnerships & collaboration requests
-    
-  ⚖️ Middleman
-    • Secure & verified trading
-    • Trusted middleman services
-    • Trade protection enforced by staff', color=COLORS['support'])
+    embed = discord.Embed(
+        title='🎟️ Ticket Center | Support & Middleman',
+        description=(
+            "🛠️ **Support**\n"
+            "• General support\n"
+            "• Claiming giveaway or event prizes\n"
+            "• Partnership requests\n\n"
+            "⚖️ **Middleman**\n"
+            "• Secure & verified trading\n"
+            "• Trusted middleman services\n"
+            "• Trades protected by trusted middlemen"
+        ),
+        color=COLORS['support']
+    )
+
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
+
     try:
         await ctx.message.delete()
     except:
