@@ -180,9 +180,9 @@ class MiddlemanModal(Modal, title='Middleman Request'):
 class MiddlemanTierSelect(Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label='Low Value', value='lowtier', emoji='🟢'),
-            discord.SelectOption(label='Mid Value', value='midtier', emoji='🟡'),
-            discord.SelectOption(label='High Value', value='hightier', emoji='🔴')
+            discord.SelectOption(label='0-150M Middleman', value='lowtier', emoji='💸'),
+            discord.SelectOption(label='150-500M Middleman', value='midtier', emoji='💎'),
+            discord.SelectOption(label='500M+ Middleman', value='hightier', emoji='💲')
         ]
         super().__init__(placeholder='Select trade value', options=options)
     async def callback(self, interaction):
@@ -637,7 +637,7 @@ async def config_cmd(ctx):
     role_text = ""
     for tier, role_id in HARDCODED_ROLES.items():
         role = ctx.guild.get_role(role_id)
-        tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value', 'staff': 'Staff'}
+        tier_names = {'lowtier': '0-150M Middleman', 'midtier': '150-500M Middleman', 'hightier': '500M+ Middleman', 'staff': 'Staff'}
         tier_name = tier_names.get(tier, tier)
         role_text += f"**{tier_name}:** {role.mention if role else '❌ Not found'}\n"
     embed.add_field(name='Hardcoded Roles', value=role_text, inline=False)
