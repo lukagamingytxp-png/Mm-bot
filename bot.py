@@ -20,7 +20,8 @@ logger = logging.getLogger('TicketBot')
 HARDCODED_ROLES = {
     'lowtier': 1453757017218093239,
     'midtier': 1434610759140118640,
-    'hightier': 1453757157144137911
+    'hightier': 1453757157144137911,
+    'staff': 1432081794647199895
 }
 
 COLORS = {
@@ -61,7 +62,7 @@ class Database:
     async def create_tables(self):
         async with self.pool.acquire() as conn:
             await conn.execute('CREATE TABLE IF NOT EXISTS config (guild_id BIGINT PRIMARY KEY, ticket_category_id BIGINT, log_channel_id BIGINT, proof_channel_id BIGINT)')
-            await conn.execute('CREATE TABLE IF NOT EXISTS tickets (ticket_id TEXT PRIMARY KEY, guild_id BIGINT, channel_id BIGINT, user_id BIGINT, ticket_type TEXT, tier TEXT, claimed_by BIGINT, status TEXT DEFAULT \'open\', trade_details JSONB, created_at TIMESTAMP DEFAULT NOW(), claimed_at TIMESTAMP)')
+            await conn.execute('CREATE TABLE IF NOT EXISTS tickets (ticket_id TEXT PRIMARY KEY, guild_id BIGINT, channel_id BIGINT, user_id BIGINT, ticket_type TEXT, tier TEXT, claimed_by BIGINT, status TEXT DEFAULT \'open\', trade_details JSONB, created_at TIMESTAMP DEFAULT NOW())')
             await conn.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id BIGINT PRIMARY KEY, guild_id BIGINT, reason TEXT, blacklisted_by BIGINT)')
             await conn.execute('CREATE TABLE IF NOT EXISTS ps_links (user_id BIGINT, game_key TEXT, game_name TEXT, link TEXT, PRIMARY KEY (user_id, game_key))')
     async def close(self):
@@ -148,7 +149,7 @@ class MiddlemanModal(Modal, title='Middleman Request'):
             embed = discord.Embed(color=COLORS.get(self.tier))
             embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
             embed.title = '⚖️ Middleman Request'
-            embed.description = f'**Tier:** {tier_names.get(self.tier)}\n\nA middleman will claim this shortly.\n\n📋 **Guidelines:**\n• Be patient and respectful\n• Provide all necessary info\n• Don\'t spam or ping staff\n• Wait for staff to claim\n\n⏱️ Timer starts when claimed'
+            embed.description = f'**Tier:** {tier_names.get(self.tier)}\n\nA middleman will claim this shortly.\n\n📋 **Guidelines:**\n• Be patient and respectful\n• Provide all necessary info\n• Don\'t spam or ping staff\n• Wait for staff to claim'
             embed.add_field(name='Trading With', value=trade_details['trader'], inline=False)
             embed.add_field(name='Giving', value=trade_details['giving'], inline=True)
             embed.add_field(name='Receiving', value=trade_details['receiving'], inline=True)
@@ -227,6 +228,11 @@ class TicketPanelView(View):
                 user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
                 guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
             }
+            staff_role_id = HARDCODED_ROLES.get('staff')
+            if staff_role_id:
+                staff_role = guild.get_role(staff_role_id)
+                if staff_role:
+                    overwrites[staff_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
             channel = await category.create_text_channel(name=channel_name, overwrites=overwrites)
             async with db.pool.acquire() as conn:
                 await conn.execute('INSERT INTO tickets (ticket_id, guild_id, channel_id, user_id, ticket_type) VALUES ($1, $2, $3, $4, $5)', ticket_id, guild.id, channel.id, user.id, 'support')
@@ -236,7 +242,12 @@ class TicketPanelView(View):
             embed.description = 'Our team will help you shortly.\n\n📋 **Guidelines:**\n• Be patient and respectful\n• Provide all info\n• Don\'t spam\n• Wait for staff'
             embed.set_footer(text=f'ID: {ticket_id}')
             view = TicketControlView()
-            await channel.send(content=user.mention, embed=embed, view=view)
+            ping_msg = user.mention
+            if staff_role_id:
+                staff_role = guild.get_role(staff_role_id)
+                if staff_role:
+                    ping_msg += f" {staff_role.mention}"
+            await channel.send(content=ping_msg, embed=embed, view=view)
             success_embed = discord.Embed(title='✅ Ticket Created', description=f'{channel.mention}', color=COLORS['success'])
             await interaction.followup.send(embed=success_embed, ephemeral=True)
         except Exception as e:
@@ -263,8 +274,8 @@ class TicketControlView(View):
                     return await interaction.response.send_message('❌ Not a ticket', ephemeral=True)
                 if ticket['claimed_by']:
                     return await interaction.response.send_message('❌ Already claimed', ephemeral=True)
-                await conn.execute('UPDATE tickets SET claimed_by = $1, claimed_at = NOW(), status = $2 WHERE ticket_id = $3', interaction.user.id, 'claimed', ticket['ticket_id'])
-            embed = discord.Embed(title='✋ Claimed', description=f'By {interaction.user.mention}\n\n⏱️ Timer started!', color=COLORS['success'])
+                await conn.execute('UPDATE tickets SET claimed_by = $1, status = $2 WHERE ticket_id = $3', interaction.user.id, 'claimed', ticket['ticket_id'])
+            embed = discord.Embed(title='✋ Claimed', description=f'By {interaction.user.mention}', color=COLORS['success'])
             await interaction.response.send_message(embed=embed)
         except Exception as e:
             logger.error(f'Claim error: {e}')
@@ -282,8 +293,8 @@ class TicketControlView(View):
                     return await interaction.response.send_message('❌ Not claimed', ephemeral=True)
                 if ticket['claimed_by'] != interaction.user.id:
                     return await interaction.response.send_message('❌ Only claimer can unclaim', ephemeral=True)
-                await conn.execute('UPDATE tickets SET claimed_by = NULL, claimed_at = NULL, status = $1 WHERE ticket_id = $2', 'open', ticket['ticket_id'])
-            embed = discord.Embed(title='↩️ Unclaimed', description='Ticket available\n\n⏱️ Timer stopped!', color=COLORS['support'])
+                await conn.execute('UPDATE tickets SET claimed_by = NULL, status = $1 WHERE ticket_id = $2', 'open', ticket['ticket_id'])
+            embed = discord.Embed(title='↩️ Unclaimed', description='Ticket available', color=COLORS['support'])
             await interaction.response.send_message(embed=embed)
         except Exception as e:
             logger.error(f'Unclaim error: {e}')
@@ -304,13 +315,8 @@ async def close_cmd(ctx):
                 return await ctx.reply('❌ Must be claimed first')
             if ticket['claimed_by'] != ctx.author.id:
                 return await ctx.reply('❌ Only claimer can close')
-            duration_text = "N/A"
-            if ticket['claimed_at']:
-                duration = datetime.utcnow() - ticket['claimed_at']
-                minutes = int(duration.total_seconds() / 60)
-                duration_text = f"{minutes} min"
             await conn.execute('UPDATE tickets SET status = $1 WHERE ticket_id = $2', 'closed', ticket['ticket_id'])
-        embed = discord.Embed(title='🔒 Closing', description=f'Closed by {ctx.author.mention}\n⏱️ Duration: **{duration_text}**', color=COLORS['error'])
+        embed = discord.Embed(title='🔒 Closing', description=f'Closed by {ctx.author.mention}', color=COLORS['error'])
         await ctx.send(embed=embed)
         config = await db.pool.fetchrow('SELECT * FROM config WHERE guild_id = $1', ctx.guild.id)
         if config and config.get('log_channel_id'):
@@ -318,7 +324,7 @@ async def close_cmd(ctx):
             if log_channel:
                 opener = ctx.guild.get_member(ticket['user_id'])
                 claimer = ctx.guild.get_member(ticket['claimed_by'])
-                transcript = f"TRANSCRIPT\n{'='*50}\nID: {ticket['ticket_id']}\nOpened: {opener.name if opener else 'Unknown'}\nClaimed: {claimer.name if claimer else 'Unknown'}\nClosed: {ctx.author.name}\nDuration: {duration_text}\n{'='*50}\n\n"
+                transcript = f"TRANSCRIPT\n{'='*50}\nID: {ticket['ticket_id']}\nOpened: {opener.name if opener else 'Unknown'}\nClaimed: {claimer.name if claimer else 'Unknown'}\nClosed: {ctx.author.name}\n{'='*50}\n\n"
                 messages = []
                 async for msg in ctx.channel.history(limit=100, oldest_first=True):
                     content = msg.content if msg.content else '[No content]'
@@ -327,7 +333,6 @@ async def close_cmd(ctx):
                 file = discord.File(fp=io.BytesIO(transcript.encode('utf-8')), filename=f"transcript-{ticket['ticket_id']}.txt")
                 log_embed = discord.Embed(title='🔒 Ticket Closed', color=COLORS['error'])
                 log_embed.add_field(name='ID', value=ticket['ticket_id'], inline=True)
-                log_embed.add_field(name='Duration', value=duration_text, inline=True)
                 await log_channel.send(embed=log_embed, file=file)
         await asyncio.sleep(0.5)
         await ctx.channel.delete()
@@ -346,8 +351,8 @@ async def claim_cmd(ctx):
                 return await ctx.reply('❌ Not found')
             if ticket['claimed_by']:
                 return await ctx.reply('❌ Already claimed')
-            await conn.execute('UPDATE tickets SET claimed_by = $1, claimed_at = NOW() WHERE ticket_id = $2', ctx.author.id, ticket['ticket_id'])
-        embed = discord.Embed(title='✋ Claimed', description=f'By {ctx.author.mention}\n\n⏱️ Timer started!', color=COLORS['success'])
+            await conn.execute('UPDATE tickets SET claimed_by = $1, status = $2 WHERE ticket_id = $3', ctx.author.id, 'claimed', ticket['ticket_id'])
+        embed = discord.Embed(title='✋ Claimed', description=f'By {ctx.author.mention}', color=COLORS['success'])
         await ctx.send(embed=embed)
     except Exception as e:
         await ctx.reply(f'❌ Error: {str(e)}')
@@ -365,8 +370,8 @@ async def unclaim_cmd(ctx):
                 return await ctx.reply('❌ Not claimed')
             if ticket['claimed_by'] != ctx.author.id:
                 return await ctx.reply('❌ Only claimer can unclaim')
-            await conn.execute('UPDATE tickets SET claimed_by = NULL, claimed_at = NULL WHERE ticket_id = $1', ticket['ticket_id'])
-        embed = discord.Embed(title='↩️ Unclaimed', description='Ticket available\n\n⏱️ Timer stopped!', color=COLORS['support'])
+            await conn.execute('UPDATE tickets SET claimed_by = NULL, status = $1 WHERE ticket_id = $2', 'open', ticket['ticket_id'])
+        embed = discord.Embed(title='↩️ Unclaimed', description='Ticket available', color=COLORS['support'])
         await ctx.send(embed=embed)
     except Exception as e:
         await ctx.reply(f'❌ Error: {str(e)}')
@@ -455,18 +460,12 @@ async def proof_cmd(ctx):
         proof_channel = ctx.guild.get_channel(config['proof_channel_id'])
         if not proof_channel:
             return await ctx.reply('❌ Proof channel not found')
-        duration_text = "N/A"
-        if ticket.get('claimed_at'):
-            duration = datetime.utcnow() - ticket['claimed_at']
-            minutes = int(duration.total_seconds() / 60)
-            duration_text = f"{minutes} min"
         opener = ctx.guild.get_member(ticket['user_id'])
         embed = discord.Embed(title='✅ Trade Completed', color=COLORS['success'])
         embed.add_field(name='Middleman', value=ctx.author.mention, inline=True)
         if ticket.get('tier'):
             tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value'}
             embed.add_field(name='Tier', value=tier_names.get(ticket['tier']), inline=True)
-        embed.add_field(name='Duration', value=f'⏱️ {duration_text}', inline=True)
         embed.add_field(name='Requester', value=opener.mention if opener else 'Unknown', inline=True)
         if ticket.get('trade_details'):
             try:
@@ -483,6 +482,7 @@ async def proof_cmd(ctx):
         success = discord.Embed(title='✅ Proof Sent', description=f'Posted to {proof_channel.mention}', color=COLORS['success'])
         await ctx.reply(embed=success)
     except Exception as e:
+        logger.error(f'Proof error: {e}')
         await ctx.reply(f'❌ Error: {str(e)}')
 
 @bot.command(name='setps')
@@ -561,7 +561,6 @@ async def removeps_cmd(ctx, game: str = None):
     embed = discord.Embed(title='✅ Removed', description=f'Deleted `{game}`', color=COLORS['success'])
     await ctx.reply(embed=embed)
 
-
 @bot.command(name='setup')
 @commands.has_permissions(administrator=True)
 async def setup_cmd(ctx):
@@ -598,10 +597,14 @@ async def setlogs_cmd(ctx, channel: discord.TextChannel = None):
 async def setproof_cmd(ctx, channel: discord.TextChannel = None):
     if not channel:
         return await ctx.reply('❌ Missing channel\n\nExample: `$setproof #proofs`')
-    async with db.pool.acquire() as conn:
-        await conn.execute('INSERT INTO config (guild_id, proof_channel_id) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET proof_channel_id = $2', ctx.guild.id, channel.id)
-    embed = discord.Embed(title='✅ Proof Set', description=f'{channel.mention}', color=COLORS['success'])
-    await ctx.reply(embed=embed)
+    try:
+        async with db.pool.acquire() as conn:
+            await conn.execute('INSERT INTO config (guild_id, proof_channel_id) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET proof_channel_id = $2', ctx.guild.id, channel.id)
+        embed = discord.Embed(title='✅ Proof Set', description=f'{channel.mention}', color=COLORS['success'])
+        await ctx.reply(embed=embed)
+    except Exception as e:
+        logger.error(f'Setproof error: {e}')
+        await ctx.reply(f'❌ Error: {str(e)}')
 
 @bot.command(name='config')
 @commands.has_permissions(administrator=True)
@@ -619,7 +622,7 @@ async def config_cmd(ctx):
     role_text = ""
     for tier, role_id in HARDCODED_ROLES.items():
         role = ctx.guild.get_role(role_id)
-        tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value'}
+        tier_names = {'lowtier': 'Low Value', 'midtier': 'Mid Value', 'hightier': 'High Value', 'staff': 'Staff'}
         tier_name = tier_names.get(tier, tier)
         role_text += f"**{tier_name}:** {role.mention if role else '❌ Not found'}\n"
     embed.add_field(name='Hardcoded Roles', value=role_text, inline=False)
