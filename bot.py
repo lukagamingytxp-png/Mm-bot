@@ -148,7 +148,7 @@ class MiddlemanModal(Modal, title='Middleman Request'):
             embed = discord.Embed(color=COLORS.get(self.tier))
             embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
             embed.title = '⚖️ Middleman Request'
-            embed.description = f'**Tier:** {tier_names.get(self.tier)}\n\nA middleman will claim this shortly.'
+            embed.description = f'**Tier:** {tier_names.get(self.tier)}\n\nA middleman will claim this shortly.\n\n📋 **Guidelines:**\n• Be patient and respectful\n• Provide all necessary info\n• Don\'t spam or ping staff\n• Wait for staff to claim\n\n⏱️ Timer starts when claimed'
             embed.add_field(name='Trading With', value=trade_details['trader'], inline=False)
             embed.add_field(name='Giving', value=trade_details['giving'], inline=True)
             embed.add_field(name='Receiving', value=trade_details['receiving'], inline=True)
@@ -162,9 +162,6 @@ class MiddlemanModal(Modal, title='Middleman Request'):
                 if tier_role:
                     ping_msg += f" {tier_role.mention}"
             await channel.send(content=ping_msg, embed=embed, view=view)
-            welcome_embed = discord.Embed(title='📋 Ticket Guidelines', color=COLORS['support'])
-            welcome_embed.description = "• Be patient and respectful\n• Provide all necessary info\n• Don't spam or ping staff\n• Wait for staff to claim\n\n⏱️ Timer starts when claimed"
-            await channel.send(embed=welcome_embed)
             if config and config.get('log_channel_id'):
                 log_channel = guild.get_channel(config['log_channel_id'])
                 if log_channel:
@@ -236,13 +233,10 @@ class TicketPanelView(View):
             embed = discord.Embed(color=COLORS['support'])
             embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
             embed.title = '🎫 Support Ticket'
-            embed.description = 'Our team will help you shortly.'
+            embed.description = 'Our team will help you shortly.\n\n📋 **Guidelines:**\n• Be patient and respectful\n• Provide all info\n• Don\'t spam\n• Wait for staff'
             embed.set_footer(text=f'ID: {ticket_id}')
             view = TicketControlView()
             await channel.send(content=user.mention, embed=embed, view=view)
-            welcome_embed = discord.Embed(title='📋 Guidelines', color=COLORS['support'])
-            welcome_embed.description = "• Be patient and respectful\n• Provide all info\n• Don't spam\n• Wait for staff"
-            await channel.send(embed=welcome_embed)
             success_embed = discord.Embed(title='✅ Ticket Created', description=f'{channel.mention}', color=COLORS['success'])
             await interaction.followup.send(embed=success_embed, ephemeral=True)
         except Exception as e:
@@ -269,12 +263,12 @@ class TicketControlView(View):
                     return await interaction.response.send_message('❌ Not a ticket', ephemeral=True)
                 if ticket['claimed_by']:
                     return await interaction.response.send_message('❌ Already claimed', ephemeral=True)
-                await conn.execute('UPDATE tickets SET claimed_by = $1, claimed_at = NOW() WHERE ticket_id = $2', interaction.user.id, ticket['ticket_id'])
+                await conn.execute('UPDATE tickets SET claimed_by = $1, claimed_at = NOW(), status = $2 WHERE ticket_id = $3', interaction.user.id, 'claimed', ticket['ticket_id'])
             embed = discord.Embed(title='✋ Claimed', description=f'By {interaction.user.mention}\n\n⏱️ Timer started!', color=COLORS['success'])
             await interaction.response.send_message(embed=embed)
         except Exception as e:
             logger.error(f'Claim error: {e}')
-            await interaction.response.send_message('❌ Error', ephemeral=True)
+            await interaction.response.send_message(f'❌ Error: {str(e)}', ephemeral=True)
     @discord.ui.button(label='Unclaim', style=discord.ButtonStyle.gray, custom_id='unclaim_ticket', emoji='↩️')
     async def unclaim_button(self, interaction, button):
         if not rate_limiter.check_cooldown(interaction.user.id, 'unclaim', 2):
@@ -288,12 +282,12 @@ class TicketControlView(View):
                     return await interaction.response.send_message('❌ Not claimed', ephemeral=True)
                 if ticket['claimed_by'] != interaction.user.id:
                     return await interaction.response.send_message('❌ Only claimer can unclaim', ephemeral=True)
-                await conn.execute('UPDATE tickets SET claimed_by = NULL, claimed_at = NULL WHERE ticket_id = $1', ticket['ticket_id'])
+                await conn.execute('UPDATE tickets SET claimed_by = NULL, claimed_at = NULL, status = $1 WHERE ticket_id = $2', 'open', ticket['ticket_id'])
             embed = discord.Embed(title='↩️ Unclaimed', description='Ticket available\n\n⏱️ Timer stopped!', color=COLORS['support'])
             await interaction.response.send_message(embed=embed)
         except Exception as e:
             logger.error(f'Unclaim error: {e}')
-            await interaction.response.send_message('❌ Error', ephemeral=True)
+            await interaction.response.send_message(f'❌ Error: {str(e)}', ephemeral=True)
 
 @bot.command(name='close')
 async def close_cmd(ctx):
@@ -566,7 +560,6 @@ async def removeps_cmd(ctx, game: str = None):
         await conn.execute('DELETE FROM ps_links WHERE user_id = $1 AND game_key = $2', ctx.author.id, game.lower())
     embed = discord.Embed(title='✅ Removed', description=f'Deleted `{game}`', color=COLORS['success'])
     await ctx.reply(embed=embed)
-
 
 
 @bot.command(name='setup')
