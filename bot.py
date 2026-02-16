@@ -88,34 +88,36 @@ class AntiNuke:
         self.enabled = {}
         self.channel_deletes = defaultdict(list)
         self.bot_adds = defaultdict(list)
+        self.integration_adds = defaultdict(list)
         self.whitelisted = defaultdict(list)
+    
     def add_channel_delete(self, guild_id, user_id):
         now = datetime.utcnow()
         self.channel_deletes[(guild_id, user_id)].append(now)
         self.channel_deletes[(guild_id, user_id)] = [d for d in self.channel_deletes[(guild_id, user_id)] if now - d < timedelta(seconds=5)]
+    
     def is_nuke(self, guild_id, user_id):
         if not self.enabled.get(guild_id): return False
         if user_id in self.whitelisted.get(guild_id, []): return False
         return len(self.channel_deletes.get((guild_id, user_id), [])) >= 3
+    
     def add_bot_add(self, guild_id, user_id):
         self.bot_adds[(guild_id, user_id)] = datetime.utcnow()
+    
     def can_add_bot(self, guild_id, user_id):
+        if not self.enabled.get(guild_id): return True
+        return user_id in self.whitelisted.get(guild_id, [])
+    
+    def add_integration(self, guild_id, user_id):
+        now = datetime.utcnow()
+        self.integration_adds[(guild_id, user_id)].append(now)
+        self.integration_adds[(guild_id, user_id)] = [i for i in self.integration_adds[(guild_id, user_id)] if now - i < timedelta(seconds=10)]
+    
+    def can_add_integration(self, guild_id, user_id):
         if not self.enabled.get(guild_id): return True
         return user_id in self.whitelisted.get(guild_id, [])
 
 anti_nuke = AntiNuke()
-
-class AntiAlt:
-    def __init__(self):
-        self.enabled = {}
-        self.min_age = {}
-    def is_alt(self, guild_id, member):
-        if not self.enabled.get(guild_id): return False
-        min_days = self.min_age.get(guild_id, 7)
-        account_age = (datetime.utcnow() - member.created_at).days
-        return account_age < min_days
-
-anti_alt = AntiAlt()
 
 class Lockdown:
     def __init__(self):
@@ -154,6 +156,7 @@ intents.message_content = True
 intents.members = True
 intents.guilds = True
 intents.bans = True
+intents.integrations = True
 bot = commands.Bot(command_prefix='$', intents=intents, help_command=None)
 
 async def generate_ticket_id():
@@ -267,17 +270,33 @@ class MiddlemanTierSelect(Select):
         await interaction.response.send_modal(modal)
 
 class TradeConfirmView(View):
-    def __init__(self):
+    def __init__(self, ticket_creator_id, other_trader_ids):
         super().__init__(timeout=None)
         self.confirmed = set()
+        self.ticket_creator_id = ticket_creator_id
+        self.other_trader_ids = other_trader_ids  # List of other people in the channel who can confirm
     @discord.ui.button(label='Confirm', style=discord.ButtonStyle.success, emoji='✅', custom_id='confirm_trade')
     async def confirm_button(self, interaction, button):
+        # Check if user is allowed to confirm (ticket creator or other traders, NOT the middleman)
+        allowed_users = [self.ticket_creator_id] + self.other_trader_ids
+        if interaction.user.id not in allowed_users:
+            return await interaction.response.send_message('❌ Only the traders can confirm (not the middleman)', ephemeral=True)
+        
+        # Check if already confirmed
+        if interaction.user.id in self.confirmed:
+            return await interaction.response.send_message('❌ You already confirmed', ephemeral=True)
+        
         self.confirmed.add(interaction.user.id)
+        
+        # Update embed with confirmation count
         if len(self.confirmed) >= 2:
-            embed = discord.Embed(title='✅ Trade Confirmed', description='Both parties confirmed', color=COLORS['success'])
+            embed = discord.Embed(title='✅ Trade Confirmed', description='**Both parties have confirmed!**\n\nTrade completed successfully.', color=COLORS['success'])
+            embed.set_footer(text='You can now use $proof to post completion proof')
             await interaction.response.edit_message(embed=embed, view=None)
         else:
-            await interaction.response.send_message(f'✅ Confirmed ({len(self.confirmed)}/2)', ephemeral=True)
+            # Show confirmation count
+            embed = discord.Embed(title='✅ Confirm Trade', description=f'**{len(self.confirmed)}/2 confirmed**\n\nOne trader has confirmed. Waiting for the other party...', color=COLORS['support'])
+            await interaction.response.edit_message(embed=embed, view=self)
 
 class TicketPanelView(View):
     def __init__(self):
@@ -305,25 +324,19 @@ class TicketPanelView(View):
                 user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
                 guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
             }
-            staff_role_id = HARDCODED_ROLES.get('staff')
-            if staff_role_id:
-                staff_role = guild.get_role(staff_role_id)
-                if staff_role:
-                    overwrites[staff_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            staff_role = guild.get_role(HARDCODED_ROLES['staff'])
+            if staff_role:
+                overwrites[staff_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
             channel = await category.create_text_channel(name=channel_name, overwrites=overwrites)
             async with db.pool.acquire() as conn:
-                await conn.execute('INSERT INTO tickets (ticket_id, guild_id, channel_id, user_id, ticket_type) VALUES ($1, $2, $3, $4, $5)', ticket_id, guild.id, channel.id, user.id, 'support')
-            embed = discord.Embed(color=COLORS['support'])
+                await conn.execute('INSERT INTO tickets (ticket_id, guild_id, channel_id, user_id, ticket_type, tier) VALUES ($1, $2, $3, $4, $5, $6)', ticket_id, guild.id, channel.id, user.id, 'support', 'support')
+            embed = discord.Embed(title='🎫 Support Ticket', description='Staff will assist you shortly', color=COLORS['support'])
             embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-            embed.title = '🎫 Support Ticket'
-            embed.description = 'Our team will help you shortly.\n\n📋 **Guidelines:**\n• Be patient and respectful\n• Provide all info\n• Don\'t spam\n• Wait for staff'
             embed.set_footer(text=f'ID: {ticket_id}')
             view = TicketControlView()
             ping_msg = user.mention
-            if staff_role_id:
-                staff_role = guild.get_role(staff_role_id)
-                if staff_role:
-                    ping_msg += f" {staff_role.mention}"
+            if staff_role:
+                ping_msg += f" {staff_role.mention}"
             await channel.send(content=ping_msg, embed=embed, view=view)
             success_embed = discord.Embed(title='✅ Ticket Created', description=f'{channel.mention}', color=COLORS['success'])
             await interaction.followup.send(embed=success_embed, ephemeral=True)
@@ -448,7 +461,7 @@ async def unclaim_cmd(ctx):
             if ticket['claimed_by'] != ctx.author.id:
                 return await ctx.reply('❌ Only claimer can unclaim')
             await conn.execute('UPDATE tickets SET claimed_by = NULL, status = $1 WHERE ticket_id = $2', 'open', ticket['ticket_id'])
-        embed = discord.Embed(title='↩️ Unclaimed', description='Ticket available', color=COLORS['support'])
+        embed = discord.Embed(title='↩️ Unclaimed', description='Available', color=COLORS['support'])
         await ctx.send(embed=embed)
     except Exception as e:
         await ctx.reply(f'❌ Error: {str(e)}')
@@ -518,9 +531,42 @@ async def rename_cmd(ctx, *, new_name: str = None):
 async def confirm_cmd(ctx):
     if not ctx.channel.name.startswith('ticket-'):
         return await ctx.reply('❌ Not a ticket')
-    embed = discord.Embed(title='✅ Confirm Trade', description='Both parties click below', color=COLORS['support'])
-    view = TradeConfirmView()
-    await ctx.send(embed=embed, view=view)
+    try:
+        async with db.pool.acquire() as conn:
+            ticket = await conn.fetchrow('SELECT * FROM tickets WHERE channel_id = $1', ctx.channel.id)
+            if not ticket:
+                return await ctx.reply('❌ Ticket not found')
+            if not ticket['claimed_by']:
+                return await ctx.reply('❌ Ticket must be claimed first')
+        
+        # Get all members who can see the channel (except bot and claimer)
+        claimer_id = ticket['claimed_by']
+        ticket_creator_id = ticket['user_id']
+        
+        # Find other traders (people added to the channel who aren't the bot or claimer)
+        other_traders = []
+        for member in ctx.channel.members:
+            if member.id != bot.user.id and member.id != claimer_id and member.id != ticket_creator_id:
+                other_traders.append(member.id)
+        
+        # Build the description with traders
+        ticket_creator = ctx.guild.get_member(ticket_creator_id)
+        trader_mentions = [ticket_creator.mention]
+        
+        for trader_id in other_traders:
+            trader = ctx.guild.get_member(trader_id)
+            if trader:
+                trader_mentions.append(trader.mention)
+        
+        embed = discord.Embed(title='✅ Confirm Trade', color=COLORS['support'])
+        embed.description = f'**Both traders must confirm:**\n\n' + '\n'.join(trader_mentions) + '\n\nClick below to confirm the trade was completed successfully.'
+        embed.set_footer(text='0/2 confirmed')
+        
+        view = TradeConfirmView(ticket_creator_id, other_traders)
+        await ctx.send(embed=embed, view=view)
+    except Exception as e:
+        logger.error(f'Confirm error: {e}')
+        await ctx.reply(f'❌ Error: {str(e)}')
 
 @bot.command(name='proof')
 async def proof_cmd(ctx):
@@ -596,14 +642,13 @@ async def pslist_cmd(ctx):
     async with db.pool.acquire() as conn:
         rows = await conn.fetch('SELECT game_key, game_name FROM ps_links WHERE user_id = $1', ctx.author.id)
     if not rows:
-        return await ctx.reply('❌ No PS links\n\nExample: `$setps bloxfruits https://link Bobs Mansion`')
-    embed = discord.Embed(title='🔗 Your PS Links', color=COLORS['support'])
+        return await ctx.reply('❌ No PS links\n\nUse `$setps` to add')
     links = '\n'.join([f'**{row["game_key"]}** — {row["game_name"]}' for row in rows])
-    embed.description = links
+    embed = discord.Embed(title='🔗 Your PS Links', description=links, color=COLORS['support'])
     await ctx.reply(embed=embed)
 
 @bot.command(name='ps')
-async def ps_cmd(ctx, *, identifier: str = None):
+async def ps_cmd(ctx, identifier: str = None):
     if not ctx.channel.name.startswith('ticket-'):
         return await ctx.reply('❌ Only in tickets')
     if not any(role.id in HARDCODED_ROLES.values() for role in ctx.author.roles):
@@ -752,7 +797,7 @@ async def unjail_cmd(ctx, member: discord.Member = None):
             await conn.execute('DELETE FROM jailed_users WHERE user_id = $1', member.id)
         embed = discord.Embed(title='✅ User Unjailed', color=COLORS['success'])
         embed.add_field(name='User', value=member.mention, inline=True)
-        embed.add_field(name='Roles Restored', value=f'{restored} roles', inline=True)
+        embed.add_field(name='Roles Restored', value=f'{restored}/{len(saved_roles)}', inline=True)
         await ctx.reply(embed=embed)
     except Exception as e:
         logger.error(f'Unjail error: {e}')
@@ -761,20 +806,16 @@ async def unjail_cmd(ctx, member: discord.Member = None):
 @bot.command(name='jailed')
 @commands.has_permissions(administrator=True)
 async def jailed_cmd(ctx):
-    try:
-        async with db.pool.acquire() as conn:
-            jailed_users = await conn.fetch('SELECT * FROM jailed_users WHERE guild_id = $1', ctx.guild.id)
-        if not jailed_users:
-            return await ctx.reply('✅ No jailed users')
-        embed = discord.Embed(title='🚔 Jailed Users', color=COLORS['error'])
-        for row in jailed_users:
-            user = ctx.guild.get_member(row['user_id'])
-            username = user.mention if user else f"ID: {row['user_id']}"
-            embed.add_field(name=username, value=f"Reason: {row['reason']}", inline=False)
-        await ctx.reply(embed=embed)
-    except Exception as e:
-        logger.error(f'Jailed list error: {e}')
-        await ctx.reply(f'❌ Error: {str(e)}')
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch('SELECT * FROM jailed_users WHERE guild_id = $1', ctx.guild.id)
+    if not rows:
+        return await ctx.reply('✅ No jailed users')
+    embed = discord.Embed(title='🚔 Jailed Users', color=COLORS['error'])
+    for row in rows:
+        user = ctx.guild.get_member(row['user_id'])
+        username = user.mention if user else f"ID: {row['user_id']}"
+        embed.add_field(name=username, value=f"Reason: {row['reason']}", inline=False)
+    await ctx.reply(embed=embed)
 
 @bot.command(name='whitelist')
 @is_owner()
@@ -785,7 +826,7 @@ async def whitelist_cmd(ctx, member: discord.Member = None):
         return await ctx.reply('❌ User already whitelisted')
     anti_nuke.whitelisted[ctx.guild.id].append(member.id)
     embed = discord.Embed(title='✅ Whitelisted', color=COLORS['success'])
-    embed.description = f'{member.mention} can now:\n• Add bots without being kicked\n• Still limited by channel delete protection'
+    embed.description = f'{member.mention} can now:\n• Add bots without being kicked\n• Add integrations without being banned\n• Still limited by channel delete protection'
     await ctx.reply(embed=embed)
 
 @bot.command(name='unwhitelist')
@@ -812,62 +853,26 @@ async def whitelisted_cmd(ctx):
             embed.add_field(name=user.display_name, value=user.mention, inline=False)
     await ctx.reply(embed=embed)
 
-@bot.group(name='anti-alt', invoke_without_command=True)
-@is_owner()
-async def anti_alt(ctx):
-    await ctx.reply('Usage: `$anti-alt enable/disable/minage/status`')
-
-@anti_alt.command(name='enable')
-@is_owner()
-async def anti_alt_enable(ctx):
-    anti_alt.enabled[ctx.guild.id] = True
-    embed = discord.Embed(title='🛡️ Anti-Alt Enabled', description='New accounts will be auto-kicked', color=COLORS['success'])
-    await ctx.reply(embed=embed)
-
-@anti_alt.command(name='disable')
-@is_owner()
-async def anti_alt_disable(ctx):
-    anti_alt.enabled[ctx.guild.id] = False
-    embed = discord.Embed(title='🛡️ Anti-Alt Disabled', description='New accounts can join', color=COLORS['support'])
-    await ctx.reply(embed=embed)
-
-@anti_alt.command(name='minage')
-@is_owner()
-async def anti_alt_minage(ctx, days: int):
-    anti_alt.min_age[ctx.guild.id] = days
-    embed = discord.Embed(title='🛡️ Min Age Set', description=f'Accounts must be **{days}+ days** old', color=COLORS['success'])
-    await ctx.reply(embed=embed)
-
-@anti_alt.command(name='status')
-@is_owner()
-async def anti_alt_status(ctx):
-    enabled = anti_alt.enabled.get(ctx.guild.id, False)
-    min_age = anti_alt.min_age.get(ctx.guild.id, 7)
-    embed = discord.Embed(title='🛡️ Anti-Alt Status', color=COLORS['support'])
-    embed.add_field(name='Status', value='✅ Enabled' if enabled else '❌ Disabled', inline=True)
-    embed.add_field(name='Min Age', value=f'{min_age} days', inline=True)
-    await ctx.reply(embed=embed)
-
 @bot.group(name='anti-link', invoke_without_command=True)
 @is_owner()
-async def anti_link(ctx):
+async def anti_link_group(ctx):
     await ctx.reply('Usage: `$anti-link enable/disable/whitelist/status`')
 
-@anti_link.command(name='enable')
+@anti_link_group.command(name='enable')
 @is_owner()
 async def anti_link_enable(ctx):
     anti_link.enabled[ctx.guild.id] = True
     embed = discord.Embed(title='🛡️ Anti-Link Enabled', description='All links will be deleted', color=COLORS['success'])
     await ctx.reply(embed=embed)
 
-@anti_link.command(name='disable')
+@anti_link_group.command(name='disable')
 @is_owner()
 async def anti_link_disable(ctx):
     anti_link.enabled[ctx.guild.id] = False
     embed = discord.Embed(title='🛡️ Anti-Link Disabled', description='Links allowed', color=COLORS['support'])
     await ctx.reply(embed=embed)
 
-@anti_link.command(name='whitelist')
+@anti_link_group.command(name='whitelist')
 @is_owner()
 async def anti_link_whitelist(ctx, action: str = None, *, url: str = None):
     if action == 'add' and url:
@@ -892,7 +897,7 @@ async def anti_link_whitelist(ctx, action: str = None, *, url: str = None):
     else:
         await ctx.reply('Usage: `$anti-link whitelist add/remove/list <url>`')
 
-@anti_link.command(name='status')
+@anti_link_group.command(name='status')
 @is_owner()
 async def anti_link_status(ctx):
     enabled = anti_link.enabled.get(ctx.guild.id, False)
@@ -904,24 +909,24 @@ async def anti_link_status(ctx):
 
 @bot.group(name='anti-spam', invoke_without_command=True)
 @is_owner()
-async def anti_spam(ctx):
+async def anti_spam_group(ctx):
     await ctx.reply('Usage: `$anti-spam enable/disable/status`')
 
-@anti_spam.command(name='enable')
+@anti_spam_group.command(name='enable')
 @is_owner()
 async def anti_spam_enable(ctx):
     anti_spam.enabled[ctx.guild.id] = True
     embed = discord.Embed(title='🛡️ Anti-Spam Enabled', description='**3 messages in 2 seconds** = spam deleted', color=COLORS['success'])
     await ctx.reply(embed=embed)
 
-@anti_spam.command(name='disable')
+@anti_spam_group.command(name='disable')
 @is_owner()
 async def anti_spam_disable(ctx):
     anti_spam.enabled[ctx.guild.id] = False
     embed = discord.Embed(title='🛡️ Anti-Spam Disabled', color=COLORS['support'])
     await ctx.reply(embed=embed)
 
-@anti_spam.command(name='status')
+@anti_spam_group.command(name='status')
 @is_owner()
 async def anti_spam_status(ctx):
     enabled = anti_spam.enabled.get(ctx.guild.id, False)
@@ -932,25 +937,25 @@ async def anti_spam_status(ctx):
 
 @bot.group(name='anti-nuke', invoke_without_command=True)
 @is_owner()
-async def anti_nuke(ctx):
+async def anti_nuke_group(ctx):
     await ctx.reply('Usage: `$anti-nuke enable/disable/status`')
 
-@anti_nuke.command(name='enable')
+@anti_nuke_group.command(name='enable')
 @is_owner()
 async def anti_nuke_enable(ctx):
     anti_nuke.enabled[ctx.guild.id] = True
     embed = discord.Embed(title='🛡️ Anti-Nuke Enabled', color=COLORS['success'])
-    embed.description = '**Protection:**\n• Bot adds without permission = kick\n• 3+ channel deletes in 5s = kick'
+    embed.description = '**Protected:**\n• Mass channel deletes → kick\n• Unauthorized bot adds → kick both\n• Unauthorized integrations → delete & ban\n\nUse `$whitelist @user` to allow trusted users'
     await ctx.reply(embed=embed)
 
-@anti_nuke.command(name='disable')
+@anti_nuke_group.command(name='disable')
 @is_owner()
 async def anti_nuke_disable(ctx):
     anti_nuke.enabled[ctx.guild.id] = False
     embed = discord.Embed(title='🛡️ Anti-Nuke Disabled', color=COLORS['support'])
     await ctx.reply(embed=embed)
 
-@anti_nuke.command(name='status')
+@anti_nuke_group.command(name='status')
 @is_owner()
 async def anti_nuke_status(ctx):
     enabled = anti_nuke.enabled.get(ctx.guild.id, False)
@@ -958,31 +963,31 @@ async def anti_nuke_status(ctx):
     embed = discord.Embed(title='🛡️ Anti-Nuke Status', color=COLORS['support'])
     embed.add_field(name='Status', value='✅ Enabled' if enabled else '❌ Disabled', inline=True)
     embed.add_field(name='Whitelisted', value=f'{wl_count} users', inline=True)
-    embed.add_field(name='Bot Protection', value='✅ Active', inline=True)
-    embed.add_field(name='Channel Protection', value='3 dels / 5s', inline=True)
+    embed.add_field(name='Protection', value='Channel Deletes\nBot Adds\nIntegrations', inline=False)
     await ctx.reply(embed=embed)
 
 @bot.command(name='lockdown')
 @is_owner()
 async def lockdown_cmd(ctx):
     if lockdown.is_locked(ctx.guild.id):
-        return await ctx.reply('🔒 Server already locked')
+        return await ctx.reply('❌ Already locked')
     locked = 0
     for channel in ctx.guild.text_channels:
-        perms = channel.overwrites_for(ctx.guild.default_role)
-        if perms.send_messages is None or perms.send_messages:
-            lockdown.locked_channels[ctx.guild.id].append(channel.id)
+        try:
             await channel.set_permissions(ctx.guild.default_role, send_messages=False)
+            lockdown.locked_channels[ctx.guild.id].append(channel.id)
             locked += 1
+        except:
+            pass
     embed = discord.Embed(title='🔒 Server Locked', color=COLORS['error'])
-    embed.description = f'**{locked} channels** locked\nAll message permissions disabled'
+    embed.description = f'**{locked} channels** locked\nUse `$unlockdown` to unlock'
     await ctx.reply(embed=embed)
 
 @bot.command(name='unlockdown')
 @is_owner()
 async def unlockdown_cmd(ctx):
     if not lockdown.is_locked(ctx.guild.id):
-        return await ctx.reply('🔓 Server not locked')
+        return await ctx.reply('❌ Not locked')
     unlocked = 0
     for channel_id in lockdown.locked_channels[ctx.guild.id]:
         channel = ctx.guild.get_channel(channel_id)
@@ -1069,7 +1074,7 @@ async def help_cmd(ctx):
         embed.add_field(name='🚔 Jail', value='`$jail` `$unjail` `$jailed`', inline=False)
         embed.add_field(name='🚫 Mod', value='`$blacklist` `$unblacklist` `$blacklists` `$clear`', inline=False)
     if ctx.author.id == OWNER_ID:
-        embed.add_field(name='🛡️ Anti (Owner)', value='`$anti-alt` `$anti-link` `$anti-spam` `$anti-nuke`', inline=False)
+        embed.add_field(name='🛡️ Anti (Owner)', value='`$anti-link` `$anti-spam` `$anti-nuke`', inline=False)
         embed.add_field(name='🔒 Lockdown (Owner)', value='`$lockdown` `$unlockdown`', inline=False)
         embed.add_field(name='✅ Whitelist (Owner)', value='`$whitelist` `$unwhitelist` `$whitelisted`', inline=False)
     embed.add_field(name='🔧 Utility', value='`$ping` `$help`', inline=False)
@@ -1090,14 +1095,6 @@ async def on_ready():
     logger.info('Bot ready!')
 
 @bot.event
-async def on_member_join(member):
-    if anti_alt.is_alt(member.guild.id, member):
-        try:
-            await member.kick(reason='Account too new (Anti-Alt)')
-        except:
-            pass
-
-@bot.event
 async def on_member_update(before, after):
     if len(after.roles) > len(before.roles):
         new_role = set(after.roles) - set(before.roles)
@@ -1108,13 +1105,35 @@ async def on_member_update(before, after):
                     if entry.target and entry.target.bot:
                         bot_member = entry.target
                         inviter = entry.user
+                        if inviter.id == OWNER_ID:
+                            return
                         if not anti_nuke.can_add_bot(after.guild.id, inviter.id):
                             try:
                                 await bot_member.kick(reason='Unauthorized bot add (Anti-Nuke)')
-                                await inviter.kick(reason='Added bot without permission (Anti-Nuke)')
+                                await inviter.ban(reason='Added bot without permission (Anti-Nuke)')
                             except:
                                 pass
                         break
+
+@bot.event
+async def on_integration_create(integration):
+    if not anti_nuke.enabled.get(integration.guild.id):
+        return
+    try:
+        async for entry in integration.guild.audit_logs(limit=1, action=discord.AuditLogAction.integration_create):
+            creator = entry.user
+            if creator.id == OWNER_ID:
+                return
+            if not anti_nuke.can_add_integration(integration.guild.id, creator.id):
+                try:
+                    await integration.delete()
+                    await creator.ban(reason='Unauthorized integration creation (Anti-Nuke)')
+                    logger.info(f'Banned {creator} for creating integration without permission')
+                except Exception as e:
+                    logger.error(f'Failed to handle unauthorized integration: {e}')
+            break
+    except Exception as e:
+        logger.error(f'Integration create event error: {e}')
 
 @bot.event
 async def on_guild_channel_delete(channel):
@@ -1125,7 +1144,7 @@ async def on_guild_channel_delete(channel):
         anti_nuke.add_channel_delete(channel.guild.id, deleter.id)
         if anti_nuke.is_nuke(channel.guild.id, deleter.id):
             try:
-                await deleter.kick(reason='Mass channel deletion detected (Anti-Nuke)')
+                await deleter.ban(reason='Mass channel deletion detected (Anti-Nuke)')
             except:
                 pass
         break
@@ -1134,6 +1153,39 @@ async def on_guild_channel_delete(channel):
 async def on_message(message):
     if message.author.bot:
         return
+    if not message.guild:
+        return
+    
+    # Check if message is in a ticket channel
+    if message.channel.name.startswith('ticket-'):
+        try:
+            async with db.pool.acquire() as conn:
+                ticket = await conn.fetchrow('SELECT * FROM tickets WHERE channel_id = $1', message.channel.id)
+                if ticket:
+                    # Get allowed users: ticket creator, claimer, and anyone with channel permissions
+                    allowed_users = [ticket['user_id']]
+                    if ticket['claimed_by']:
+                        allowed_users.append(ticket['claimed_by'])
+                    
+                    # Add anyone who has explicit read permissions (was added via $add)
+                    for member in message.channel.members:
+                        if member.id not in allowed_users and not member.bot:
+                            # Check if they have explicit permissions (not just from roles)
+                            overwrites = message.channel.overwrites_for(member)
+                            if overwrites.read_messages == True:
+                                allowed_users.append(member.id)
+                    
+                    # Delete message if not allowed
+                    if message.author.id not in allowed_users:
+                        try:
+                            await message.delete()
+                            warning = await message.channel.send(f'{message.author.mention} You cannot send messages in this ticket.', delete_after=3)
+                        except:
+                            pass
+                        return
+        except Exception as e:
+            logger.error(f'Ticket message filter error: {e}')
+    
     anti_spam.add_message(message.guild.id, message.author.id)
     if anti_spam.is_spam(message.guild.id, message.author.id):
         try:
