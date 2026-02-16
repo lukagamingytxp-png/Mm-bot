@@ -1066,7 +1066,7 @@ async def unwhitelist_cmd(ctx, member: discord.Member = None):
         return await ctx.reply('❌ User not whitelisted')
     anti_nuke.whitelisted[ctx.guild.id].remove(member.id)
     embed = discord.Embed(title='✅ Removed', description=f'{member.mention} no longer whitelisted', color=COLORS['success'])
-    await ctx.reply(embed=embed
+    await ctx.reply(embed=embed)
 
 @bot.command(name='whitelisted')
 @is_owner()
