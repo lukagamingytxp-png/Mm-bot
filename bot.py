@@ -54,10 +54,282 @@ class RateLimiter:
 
 rate_limiter = RateLimiter()
 
+
+class Lockdown:
+    def __init__(self):
+        self.locked_channels = defaultdict(list)
+    def is_locked(self, guild_id):
+        return len(self.locked_channels.get(guild_id, [])) > 0
+
+lockdown = Lockdown()
+
+class Database:
+    def __init__(self):
+        self.pool = None
+    async def connect(self):
+        database_url = os.getenv('DATABASE_URL')
+        if not database_url:
+            raise Exception("DATABASE_URL not set")
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql://', 1)
+        self.pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10)
+        await self.create_tables()
+    async def create_tables(self):
+        async with self.pool.acquire() as conn:
+            await conn.execute('CREATE TABLE IF NOT EXISTS config (guild_id BIGINT PRIMARY KEY, ticket_category_id BIGINT, log_channel_id BIGINT)')
+            await conn.execute('CREATE TABLE IF NOT EXISTS tickets (ticket_id TEXT PRIMARY KEY, guild_id BIGINT, channel_id BIGINT, user_id BIGINT, ticket_type TEXT, tier TEXT, claimed_by BIGINT, status TEXT DEFAULT \'open\', trade_details JSONB, created_at TIMESTAMP DEFAULT NOW())')
+            await conn.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id BIGINT PRIMARY KEY, guild_id BIGINT, reason TEXT, blacklisted_by BIGINT)')
+            await conn.execute('CREATE TABLE IF NOT EXISTS ps_links (user_id BIGINT, game_key TEXT, game_name TEXT, link TEXT, PRIMARY KEY (user_id, game_key))')
+            await conn.execute('CREATE TABLE IF NOT EXISTS jailed_users (user_id BIGINT PRIMARY KEY, guild_id BIGINT, saved_roles JSONB, reason TEXT, jailed_by BIGINT, jailed_at TIMESTAMP DEFAULT NOW())')
+    async def close(self):
+        if self.pool:
+            await self.pool.close()
+
+db = Database()
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.guilds = True
+intents.bans = True
+intents.integrations = True
+bot = commands.Bot(command_prefix='$', intents=intents, help_command=None)
+
+async def generate_ticket_id():
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+
+async def handle_health(request):
+    return web.Response(text='OK', status=200)
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/health', handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv('PORT', 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f'Web server started on port {port}')
+
+def is_owner():
+    async def predicate(ctx):
+        return ctx.author.id == OWNER_ID
+    return commands.check(predicate)
+
+class MiddlemanModal(Modal, title='Middleman Request'):
+    def __init__(self, tier):
+        super().__init__()
+        self.tier = tier
+        self.trader = TextInput(label='Trading with', placeholder='@username or ID', required=True)
+        self.giving = TextInput(label='You give', placeholder='e.g., 1 garam', style=discord.TextStyle.paragraph, required=True)
+        self.receiving = TextInput(label='You receive', placeholder='e.g., 296 Robux', style=discord.TextStyle.paragraph, required=True)
+        self.tip = TextInput(label='Tip (optional)', placeholder='Optional', required=False)
+        self.add_item(self.trader)
+        self.add_item(self.giving)
+        self.add_item(self.receiving)
+        self.add_item(self.tip)
+    async def on_submit(self, interaction):
+        if not rate_limiter.check_cooldown(interaction.user.id, 'ticket', 10):
+            return await interaction.response.send_message('⏱️ Wait 10 seconds', ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            guild = interaction.guild
+            user = interaction.user
+            async with db.pool.acquire() as conn:
+                blacklist = await conn.fetchrow('SELECT * FROM blacklist WHERE user_id = $1 AND guild_id = $2', user.id, guild.id)
+                if blacklist:
+                    return await interaction.followup.send('❌ You are blacklisted', ephemeral=True)
+                config = await conn.fetchrow('SELECT * FROM config WHERE guild_id = $1', guild.id)
+                if not config or not config['ticket_category_id']:
+                    return await interaction.followup.send('❌ Not configured. Ask admin to run `$setcategory`', ephemeral=True)
+            category = guild.get_channel(config['ticket_category_id'])
+            if not category:
+                return await interaction.followup.send('❌ Category not found', ephemeral=True)
+            ticket_id = await generate_ticket_id()
+            channel_name = f'ticket-{user.name}-{ticket_id}'
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
+            }
+            role_id = HARDCODED_ROLES.get(self.tier)
+            if role_id:
+                role = guild.get_role(role_id)
+                if role:
+                    overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            channel = await category.create_text_channel(name=channel_name, overwrites=overwrites)
+            trade_details = {'trader': self.trader.value, 'giving': self.giving.value, 'receiving': self.receiving.value, 'tip': self.tip.value or 'None'}
+            async with db.pool.acquire() as conn:
+                await conn.execute('INSERT INTO tickets (ticket_id, guild_id, channel_id, user_id, ticket_type, tier, trade_details) VALUES ($1, $2, $3, $4, $5, $6, $7)', ticket_id, guild.id, channel.id, user.id, 'middleman', self.tier, json.dumps(trade_details))
+            tier_names = {'lowtier': '0-150M Middleman', 'midtier': '150-500M Middleman', 'hightier': '500M+ Middleman'}
+            embed = discord.Embed(color=COLORS.get(self.tier))
+            embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+            embed.title = '⚖️ Middleman Request'
+            embed.description = f'**Tier:** {tier_names.get(self.tier)}\n\nA middleman will claim this shortly.\n\n📋 **Guidelines:**\n• Be patient and respectful\n• Provide all necessary info\n• Don\'t spam or ping staff\n• Wait for staff to claim'
+            embed.add_field(name='Trading With', value=trade_details['trader'], inline=False)
+            embed.add_field(name='Giving', value=trade_details['giving'], inline=True)
+            embed.add_field(name='Receiving', value=trade_details['receiving'], inline=True)
+            if trade_details['tip'] != 'None':
+                embed.add_field(name='Tip', value=trade_details['tip'], inline=False)
+            embed.set_footer(text=f'ID: {ticket_id}')
+            view = TicketControlView()
+            ping_msg = user.mention
+            if role_id:
+                tier_role = guild.get_role(role_id)
+                if tier_role:
+                    ping_msg += f" {tier_role.mention}"
+            await channel.send(content=ping_msg, embed=embed, view=view)
+            if config and config.get('log_channel_id'):
+                log_channel = guild.get_channel(config['log_channel_id'])
+                if log_channel:
+                    log_embed = discord.Embed(title='✅ Ticket Opened', color=COLORS['success'])
+                    log_embed.add_field(name='ID', value=f"`{ticket_id}`", inline=True)
+                    log_embed.add_field(name='User', value=user.mention, inline=True)
+                    log_embed.add_field(name='Tier', value=tier_names.get(self.tier), inline=True)
+                    await log_channel.send(embed=log_embed)
+            success_embed = discord.Embed(title='✅ Ticket Created', description=f'{channel.mention}', color=COLORS['success'])
+            await interaction.followup.send(embed=success_embed, ephemeral=True)
+        except Exception as e:
+            logger.error(f'Error creating ticket: {e}')
+            await interaction.followup.send(f'❌ Error: {str(e)}', ephemeral=True)
+
+class MiddlemanTierSelect(Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label='0-150M Middleman', value='lowtier', emoji='🟢'),
+            discord.SelectOption(label='150-500M Middleman', value='midtier', emoji='🟡'),
+            discord.SelectOption(label='500M+ Middleman', value='hightier', emoji='🔴')
+        ]
+        super().__init__(placeholder='Select trade value', options=options)
+    async def callback(self, interaction):
+        modal = MiddlemanModal(self.values[0])
+        await interaction.response.send_modal(modal)
+
+class TradeConfirmView(View):
+    def __init__(self, ticket_creator_id, other_trader_ids):
+        super().__init__(timeout=None)
+        self.confirmed = set()
+        self.ticket_creator_id = ticket_creator_id
+        self.other_trader_ids = other_trader_ids  # List of other people in the channel who can confirm
+    @discord.ui.button(label='Confirm', style=discord.ButtonStyle.success, emoji='✅', custom_id='confirm_trade')
+    async def confirm_button(self, interaction, button):
+        # Check if user is allowed to confirm (ticket creator or other traders, NOT the middleman)
+        allowed_users = [self.ticket_creator_id] + self.other_trader_ids
+        if interaction.user.id not in allowed_users:
+            return await interaction.response.send_message('❌ Only the traders can confirm (not the middleman)', ephemeral=True)
+        
+        # Check if already confirmed
+        if interaction.user.id in self.confirmed:
+            return await interaction.response.send_message('❌ You already confirmed', ephemeral=True)
+        
+        self.confirmed.add(interaction.user.id)
+        
+        # Update embed with confirmation count
+        if len(self.confirmed) >= 2:
+            embed = discord.Embed(title='✅ Trade Confirmed', description='**Both parties have confirmed!**\n\nTrade completed successfully.', color=COLORS['success'])
+            embed.set_footer(text='You can now use $proof to post completion proof')
+            await interaction.response.edit_message(embed=embed, view=None)
+        else:
+            # Show confirmation count
+            embed = discord.Embed(title='✅ Confirm Trade', description=f'**{len(self.confirmed)}/2 confirmed**\n\nOne trader has confirmed. Waiting for the other party...', color=COLORS['support'])
+            await interaction.response.edit_message(embed=embed, view=self)
+
+class TicketPanelView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    @discord.ui.button(label='Support', style=discord.ButtonStyle.primary, emoji='🎫', custom_id='support_btn')
+    async def support_button(self, interaction, button):
+        if not rate_limiter.check_cooldown(interaction.user.id, 'ticket', 10):
+            return await interaction.response.send_message('⏱️ Wait 10 seconds', ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            guild = interaction.guild
+            user = interaction.user
+            async with db.pool.acquire() as conn:
+                blacklist = await conn.fetchrow('SELECT * FROM blacklist WHERE user_id = $1 AND guild_id = $2', user.id, guild.id)
+                if blacklist:
+                    return await interaction.followup.send('❌ You are blacklisted', ephemeral=True)
+                config = await conn.fetchrow('SELECT * FROM config WHERE guild_id = $1', guild.id)
+                if not config or not config['ticket_category_id']:
+                    return await interaction.followup.send('❌ Not configured', ephemeral=True)
+            category = guild.get_channel(config['ticket_category_id'])
+            ticket_id = await generate_ticket_id()
+            channel_name = f'ticket-{user.name}-{ticket_id}'
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
+            }
+            staff_role = guild.get_role(HARDCODED_ROLES['staff'])
+            if staff_role:
+                overwrites[staff_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            channel = await category.create_text_channel(name=channel_name, overwrites=overwrites)
+            async with db.pool.acquire() as conn:
+                await conn.execute('INSERT INTO tickets (ticket_id, guild_id, channel_id, user_id, ticket_type, tier) VALUES ($1, $2, $3, $4, $5, $6)', ticket_id, guild.id, channel.id, user.id, 'support', 'support')
+            embed = discord.Embed(title='🎫 Support Ticket', description='Staff will assist you shortly', color=COLORS['support'])
+            embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+            embed.set_footer(text=f'ID: {ticket_id}')
+            view = TicketControlView()
+            ping_msg = user.mention
+            if staff_role:
+                ping_msg += f" {staff_role.mention}"
+            await channel.send(content=ping_msg, embed=embed, view=view)
+            success_embed = discord.Embed(title='✅ Ticket Created', description=f'{channel.mention}', color=COLORS['success'])
+            await interaction.followup.send(embed=success_embed, ephemeral=True)
+        except Exception as e:
+            logger.error(f'Error: {e}')
+            await interaction.followup.send(f'❌ Error: {str(e)}', ephemeral=True)
+    @discord.ui.button(label='Middleman', style=discord.ButtonStyle.success, emoji='⚖️', custom_id='middleman_btn')
+    async def middleman_button(self, interaction, button):
+        embed = discord.Embed(title='⚖️ Select Trade Value', description='Choose tier', color=COLORS['support'])
+        view = View(timeout=300)
+        view.add_item(MiddlemanTierSelect())
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+class TicketControlView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    @discord.ui.button(label='Claim', style=discord.ButtonStyle.green, custom_id='claim_ticket', emoji='✋')
+    async def claim_button(self, interaction, button):
+        if not rate_limiter.check_cooldown(interaction.user.id, 'claim', 2):
+            return await interaction.response.send_message('⏱️ Wait', ephemeral=True)
+        try:
+            async with db.pool.acquire() as conn:
+                ticket = await conn.fetchrow('SELECT * FROM tickets WHERE channel_id = $1', interaction.channel.id)
+                if not ticket:
+                    return await interaction.response.send_message('❌ Not a ticket', ephemeral=True)
+                if ticket['claimed_by']:
+                    return await interaction.response.send_message('❌ Already claimed', ephemeral=True)
+                await conn.execute('UPDATE tickets SET claimed_by = $1, status = $2 WHERE ticket_id = $3', interaction.user.id, 'claimed', ticket['ticket_id'])
+            embed = discord.Embed(title='✋ Claimed', description=f'By {interaction.user.mention}', color=COLORS['success'])
+            await interaction.response.send_message(embed=embed)
+        except Exception as e:
+            logger.error(f'Claim error: {e}')
+            await interaction.response.send_message(f'❌ Error: {str(e)}', ephemeral=True)
+    @discord.ui.button(label='Unclaim', style=discord.ButtonStyle.gray, custom_id='unclaim_ticket', emoji='↩️')
+    async def unclaim_button(self, interaction, button):
+        if not rate_limiter.check_cooldown(interaction.user.id, 'unclaim', 2):
+            return await interaction.response.send_message('⏱️ Wait', ephemeral=True)
+        try:
+            async with db.pool.acquire() as conn:
+                ticket = await conn.fetchrow('SELECT * FROM tickets WHERE channel_id = $1', interaction.channel.id)
+                if not ticket:
+                    return await interaction.response.send_message('❌ Not a ticket', ephemeral=True)
+                if not ticket['claimed_by']:
+                    return await interaction.response.send_message('❌ Not claimed', ephemeral=True)
+                if ticket['claimed_by'] != interaction.user.id:
+                    return await interaction.response.send_message('❌ Only claimer can unclaim', ephemeral=True)
+                await conn.execute('UPDATE tickets SET claimed_by = NULL, status = $1 WHERE ticket_id = $2', 'open', ticket['ticket_id'])
+            embed = discord.Embed(title='↩️ Unclaimed', description='Ticket available', color=COLORS['support'])
+            await interaction.response.send_message(embed=embed)
+        except Exception as e:
+            logger.error(f'Unclaim error: {e}')
 class AntiSpam:
     def __init__(self):
         self.messages = defaultdict(list)
         self.enabled = {}
+        self.whitelisted_users = defaultdict(list)
+        self.whitelisted_roles = defaultdict(list)
     def add_message(self, guild_id, user_id):
         now = datetime.utcnow()
         self.messages[(guild_id, user_id)].append(now)
@@ -65,6 +337,13 @@ class AntiSpam:
     def is_spam(self, guild_id, user_id):
         if not self.enabled.get(guild_id): return False
         return len(self.messages.get((guild_id, user_id), [])) >= 3
+    def is_whitelisted(self, guild_id, member):
+        if member.id in self.whitelisted_users.get(guild_id, []):
+            return True
+        for role in member.roles:
+            if role.id in self.whitelisted_roles.get(guild_id, []):
+                return True
+        return False
 
 anti_spam = AntiSpam()
 
@@ -72,12 +351,21 @@ class AntiLink:
     def __init__(self):
         self.enabled = {}
         self.whitelist = defaultdict(list)
+        self.whitelisted_users = defaultdict(list)
+        self.whitelisted_roles = defaultdict(list)
     def is_link(self, content):
         url_pattern = re.compile(r'https?://|discord\.gg/|\.com|\.net|\.org')
         return url_pattern.search(content) is not None
-    def is_whitelisted(self, guild_id, content):
+    def is_url_whitelisted(self, guild_id, content):
         for wl in self.whitelist.get(guild_id, []):
             if wl.lower() in content.lower():
+                return True
+        return False
+    def is_user_whitelisted(self, guild_id, member):
+        if member.id in self.whitelisted_users.get(guild_id, []):
+            return True
+        for role in member.roles:
+            if role.id in self.whitelisted_roles.get(guild_id, []):
                 return True
         return False
 
@@ -89,33 +377,35 @@ class AntiNuke:
         self.channel_deletes = defaultdict(list)
         self.bot_adds = defaultdict(list)
         self.integration_adds = defaultdict(list)
-        self.whitelisted = defaultdict(list)
-    
+        self.whitelisted_users = defaultdict(list)
+        self.whitelisted_roles = defaultdict(list)
     def add_channel_delete(self, guild_id, user_id):
         now = datetime.utcnow()
         self.channel_deletes[(guild_id, user_id)].append(now)
         self.channel_deletes[(guild_id, user_id)] = [d for d in self.channel_deletes[(guild_id, user_id)] if now - d < timedelta(seconds=5)]
-    
     def is_nuke(self, guild_id, user_id):
         if not self.enabled.get(guild_id): return False
-        if user_id in self.whitelisted.get(guild_id, []): return False
+        if user_id in self.whitelisted_users.get(guild_id, []): return False
         return len(self.channel_deletes.get((guild_id, user_id), [])) >= 3
-    
     def add_bot_add(self, guild_id, user_id):
         self.bot_adds[(guild_id, user_id)] = datetime.utcnow()
-    
     def can_add_bot(self, guild_id, user_id):
         if not self.enabled.get(guild_id): return True
-        return user_id in self.whitelisted.get(guild_id, [])
-    
+        return user_id in self.whitelisted_users.get(guild_id, [])
     def add_integration(self, guild_id, user_id):
         now = datetime.utcnow()
         self.integration_adds[(guild_id, user_id)].append(now)
         self.integration_adds[(guild_id, user_id)] = [i for i in self.integration_adds[(guild_id, user_id)] if now - i < timedelta(seconds=10)]
-    
     def can_add_integration(self, guild_id, user_id):
         if not self.enabled.get(guild_id): return True
-        return user_id in self.whitelisted.get(guild_id, [])
+        return user_id in self.whitelisted_users.get(guild_id, [])
+    def is_whitelisted(self, guild_id, member):
+        if member.id in self.whitelisted_users.get(guild_id, []):
+            return True
+        for role in member.roles:
+            if role.id in self.whitelisted_roles.get(guild_id, []):
+                return True
+        return False
 
 anti_nuke = AntiNuke()
 
@@ -776,7 +1066,7 @@ async def unwhitelist_cmd(ctx, member: discord.Member = None):
         return await ctx.reply('❌ User not whitelisted')
     anti_nuke.whitelisted[ctx.guild.id].remove(member.id)
     embed = discord.Embed(title='✅ Removed', description=f'{member.mention} no longer whitelisted', color=COLORS['success'])
-    await ctx.reply(embed=embed)
+    await ctx.reply(embed=embed
 
 @bot.command(name='whitelisted')
 @is_owner()
@@ -1557,3 +1847,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
