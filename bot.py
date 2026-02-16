@@ -607,81 +607,6 @@ async def proof_cmd(ctx):
         logger.error(f'Proof error: {e}')
         await ctx.reply(f'❌ Error: {str(e)}')
 
-@bot.command(name='setps')
-async def setps_cmd(ctx, game: str = None, link: str = None, *, name: str = None):
-    if not any(role.id in HARDCODED_ROLES.values() for role in ctx.author.roles):
-        return await ctx.reply('❌ Need a middleman role')
-    if not game or not link or not name:
-        return await ctx.reply('❌ Missing arguments\n\nExample: `$setps bloxfruits https://link Bobs Mansion`')
-    async with db.pool.acquire() as conn:
-        await conn.execute('INSERT INTO ps_links (user_id, game_key, game_name, link) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, game_key) DO UPDATE SET game_name = $3, link = $4', ctx.author.id, game.lower(), name, link)
-    embed = discord.Embed(title='✅ PS Saved', color=COLORS['success'])
-    embed.add_field(name='Game', value=f"`{game}`", inline=True)
-    embed.add_field(name='Name', value=name, inline=True)
-    await ctx.reply(embed=embed)
-
-@bot.command(name='psupdate')
-async def psupdate_cmd(ctx, game: str = None, *, new_link: str = None):
-    if not any(role.id in HARDCODED_ROLES.values() for role in ctx.author.roles):
-        return await ctx.reply('❌ Need a middleman role')
-    if not game or not new_link:
-        return await ctx.reply('❌ Missing arguments\n\nExample: `$psupdate bloxfruits https://new-link`')
-    async with db.pool.acquire() as conn:
-        row = await conn.fetchrow('SELECT game_name FROM ps_links WHERE user_id = $1 AND game_key = $2', ctx.author.id, game.lower())
-        if not row:
-            return await ctx.reply(f'❌ No PS for `{game}`\n\nUse `$setps` first')
-        await conn.execute('UPDATE ps_links SET link = $1 WHERE user_id = $2 AND game_key = $3', new_link, ctx.author.id, game.lower())
-    embed = discord.Embed(title='✅ PS Updated', color=COLORS['success'])
-    embed.add_field(name='Game', value=f"`{game}`", inline=True)
-    await ctx.reply(embed=embed)
-
-@bot.command(name='pslist')
-async def pslist_cmd(ctx):
-    if not any(role.id in HARDCODED_ROLES.values() for role in ctx.author.roles):
-        return await ctx.reply('❌ Need a middleman role')
-    async with db.pool.acquire() as conn:
-        rows = await conn.fetch('SELECT game_key, game_name FROM ps_links WHERE user_id = $1', ctx.author.id)
-    if not rows:
-        return await ctx.reply('❌ No PS links\n\nUse `$setps` to add')
-    links = '\n'.join([f'**{row["game_key"]}** — {row["game_name"]}' for row in rows])
-    embed = discord.Embed(title='🔗 Your PS Links', description=links, color=COLORS['support'])
-    await ctx.reply(embed=embed)
-
-@bot.command(name='ps')
-async def ps_cmd(ctx, identifier: str = None):
-    if not ctx.channel.name.startswith('ticket-'):
-        return await ctx.reply('❌ Only in tickets')
-    if not any(role.id in HARDCODED_ROLES.values() for role in ctx.author.roles):
-        return await ctx.reply('❌ Need a middleman role')
-    if not identifier:
-        async with db.pool.acquire() as conn:
-            rows = await conn.fetch('SELECT game_key, game_name FROM ps_links WHERE user_id = $1', ctx.author.id)
-        if not rows:
-            return await ctx.reply('❌ No PS links\n\nUse `$setps`')
-        links = '\n'.join([f'**{row["game_key"]}** — {row["game_name"]}' for row in rows])
-        embed = discord.Embed(title='🔗 Your PS Links', description=links, color=COLORS['support'])
-        embed.set_footer(text='Use: $ps <game> or $ps <n>')
-        return await ctx.reply(embed=embed)
-    async with db.pool.acquire() as conn:
-        row = await conn.fetchrow('SELECT link, game_name FROM ps_links WHERE user_id = $1 AND (game_key = $2 OR game_name ILIKE $3)', ctx.author.id, identifier.lower(), f'%{identifier}%')
-    if not row:
-        return await ctx.reply(f'❌ No PS for `{identifier}`\n\nUse `$pslist`')
-    embed = discord.Embed(title='🔗 Private Server', color=COLORS['success'])
-    embed.add_field(name='Link', value=f'[Click to Join]({row["link"]})', inline=False)
-    embed.set_footer(text=f'{row["game_name"]} • By {ctx.author.display_name}')
-    await ctx.send(embed=embed)
-
-@bot.command(name='removeps')
-async def removeps_cmd(ctx, game: str = None):
-    if not any(role.id in HARDCODED_ROLES.values() for role in ctx.author.roles):
-        return await ctx.reply('❌ Need a middleman role')
-    if not game:
-        return await ctx.reply('❌ Missing game\n\nExample: `$removeps bloxfruits`')
-    async with db.pool.acquire() as conn:
-        await conn.execute('DELETE FROM ps_links WHERE user_id = $1 AND game_key = $2', ctx.author.id, game.lower())
-    embed = discord.Embed(title='✅ Removed', description=f'Deleted `{game}`', color=COLORS['success'])
-    await ctx.reply(embed=embed)
-
 @bot.command(name='setup')
 @commands.has_permissions(administrator=True)
 async def setup_cmd(ctx):
@@ -1246,23 +1171,241 @@ async def ping_cmd(ctx):
     embed = discord.Embed(title='🏓 Pong', description=f'**{latency}ms**', color=color)
     await ctx.reply(embed=embed)
 
+class HelpView(View):
+    def __init__(self, pages, author_id):
+        super().__init__(timeout=180)
+        self.pages = pages
+        self.current_page = 0
+        self.author_id = author_id
+        self.update_buttons()
+    
+    def update_buttons(self):
+        self.children[0].disabled = self.current_page == 0
+        self.children[1].disabled = self.current_page == len(self.pages) - 1
+    
+    @discord.ui.button(emoji='◀️', style=discord.ButtonStyle.primary, custom_id='help_prev')
+    async def previous_button(self, interaction, button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message('❌ This is not your help menu', ephemeral=True)
+        self.current_page -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+    
+    @discord.ui.button(emoji='▶️', style=discord.ButtonStyle.primary, custom_id='help_next')
+    async def next_button(self, interaction, button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message('❌ This is not your help menu', ephemeral=True)
+        self.current_page += 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
 @bot.command(name='help')
 async def help_cmd(ctx):
-    embed = discord.Embed(title='📚 Commands', color=COLORS['support'])
-    embed.add_field(name='🎫 Tickets', value='`$close` `$claim` `$unclaim` `$add` `$remove` `$rename`', inline=False)
-    embed.add_field(name='⚖️ Trade', value='`$confirm` `$proof`', inline=False)
-    embed.add_field(name='🔗 PS (MM only)', value='`$setps` `$psupdate` `$ps` `$pslist` `$removeps`', inline=False)
+    pages = []
+    
+    # Page 1: Ticket Commands
+    embed1 = discord.Embed(title='📚 Help Menu - Ticket Commands', color=COLORS['support'])
+    embed1.add_field(
+        name='$close',
+        value='Close the current ticket (claimer only)\n**Example:** `$close`',
+        inline=False
+    )
+    embed1.add_field(
+        name='$claim',
+        value='Claim an open ticket to work on it\n**Example:** `$claim`',
+        inline=False
+    )
+    embed1.add_field(
+        name='$unclaim',
+        value='Unclaim a ticket you previously claimed\n**Example:** `$unclaim`',
+        inline=False
+    )
+    embed1.add_field(
+        name='$add',
+        value='Add a user to the ticket channel\n**Example:** `$add @John`',
+        inline=False
+    )
+    embed1.add_field(
+        name='$remove',
+        value='Remove a user from the ticket channel\n**Example:** `$remove @John`',
+        inline=False
+    )
+    embed1.add_field(
+        name='$rename',
+        value='Rename the ticket channel\n**Example:** `$rename urgent-trade`',
+        inline=False
+    )
+    embed1.set_footer(text='Page 1/7 • Use ◀️ ▶️ to navigate')
+    pages.append(embed1)
+    
+    # Page 2: Trade Commands
+    embed2 = discord.Embed(title='📚 Help Menu - Trade Commands', color=COLORS['support'])
+    embed2.add_field(
+        name='$confirm',
+        value='Send confirmation button for traders to confirm the trade\n**Example:** `$confirm`',
+        inline=False
+    )
+    embed2.add_field(
+        name='$proof',
+        value='Post trade completion proof to the proof channel\n**Example:** `$proof`',
+        inline=False
+    )
+    embed2.set_footer(text='Page 2/6 • Use ◀️ ▶️ to navigate')
+    pages.append(embed2)
+    
+    # Page 3: Admin Commands
     if ctx.author.guild_permissions.administrator:
-        embed.add_field(name='⚙️ Admin', value='`$setup` `$setcategory` `$setlogs` `$config`', inline=False)
-        embed.add_field(name='🚔 Jail', value='`$jail` `$unjail` `$jailed`', inline=False)
-        embed.add_field(name='🚫 Mod', value='`$blacklist` `$unblacklist` `$blacklists` `$clear`', inline=False)
+        embed4 = discord.Embed(title='📚 Help Menu - Admin Commands', color=COLORS['support'])
+        embed4.description = '**⚙️ Administrator Permission Required**'
+        embed4.add_field(
+            name='$setup',
+            value='Create the ticket panel with buttons\n**Example:** `$setup`',
+            inline=False
+        )
+        embed4.add_field(
+            name='$setcategory',
+            value='Set the category where tickets will be created\n**Example:** `$setcategory #tickets`',
+            inline=False
+        )
+        embed4.add_field(
+            name='$setlogs',
+            value='Set the channel for ticket logs and transcripts\n**Example:** `$setlogs #logs`',
+            inline=False
+        )
+        embed4.add_field(
+            name='$config',
+            value='View current bot configuration\n**Example:** `$config`',
+            inline=False
+        )
+        embed4.set_footer(text='Page 3/6 • Use ◀️ ▶️ to navigate')
+        pages.append(embed4)
+        
+        # Page 4: Moderation Commands
+        embed5 = discord.Embed(title='📚 Help Menu - Moderation Commands', color=COLORS['support'])
+        embed5.description = '**🚔 Administrator Permission Required**'
+        embed5.add_field(
+            name='$jail',
+            value='Remove all roles and jail a user (saves roles for restore)\n**Example:** `$jail @Scammer Attempted fraud`',
+            inline=False
+        )
+        embed5.add_field(
+            name='$unjail',
+            value='Unjail a user and restore their saved roles\n**Example:** `$unjail @User`',
+            inline=False
+        )
+        embed5.add_field(
+            name='$jailed',
+            value='List all currently jailed users\n**Example:** `$jailed`',
+            inline=False
+        )
+        embed5.add_field(
+            name='$blacklist',
+            value='Ban a user from creating tickets\n**Example:** `$blacklist @Scammer Fraud attempt`',
+            inline=False
+        )
+        embed5.add_field(
+            name='$unblacklist',
+            value='Remove ticket ban from a user\n**Example:** `$unblacklist @User`',
+            inline=False
+        )
+        embed5.add_field(
+            name='$blacklists',
+            value='List all blacklisted users\n**Example:** `$blacklists`',
+            inline=False
+        )
+        embed5.add_field(
+            name='$clear',
+            value='Delete all bot messages in the current channel\n**Example:** `$clear`',
+            inline=False
+        )
+        embed5.set_footer(text='Page 4/6 • Use ◀️ ▶️ to navigate')
+        pages.append(embed5)
+    
+    # Page 6: Owner Commands
     if ctx.author.id == OWNER_ID:
-        embed.add_field(name='🛡️ Anti (Owner)', value='`$anti-link` `$anti-spam` `$anti-nuke`', inline=False)
-        embed.add_field(name='🔒 Lockdown (Owner)', value='`$lockdown` `$unlockdown`', inline=False)
-        embed.add_field(name='✅ Whitelist (Owner)', value='`$whitelist` `$unwhitelist` `$whitelisted`', inline=False)
-    embed.add_field(name='🔧 Utility', value='`$ping` `$help`', inline=False)
-    embed.set_footer(text='Beautiful Ticket Bot')
-    await ctx.reply(embed=embed)
+        embed6 = discord.Embed(title='📚 Help Menu - Owner Commands', color=COLORS['support'])
+        embed6.description = '**👑 Bot Owner Only**'
+        embed6.add_field(
+            name='$whitelist',
+            value='Allow user to add bots/integrations without being banned\n**Example:** `$whitelist @TrustedAdmin`',
+            inline=False
+        )
+        embed6.add_field(
+            name='$unwhitelist',
+            value='Remove whitelist permission from user\n**Example:** `$unwhitelist @User`',
+            inline=False
+        )
+        embed6.add_field(
+            name='$whitelisted',
+            value='List all whitelisted users\n**Example:** `$whitelisted`',
+            inline=False
+        )
+        embed6.add_field(
+            name='$anti-link enable/disable',
+            value='Toggle link deletion protection\n**Example:** `$anti-link enable`',
+            inline=False
+        )
+        embed6.add_field(
+            name='$anti-spam enable/disable',
+            value='Toggle spam protection (3 messages in 2 seconds)\n**Example:** `$anti-spam enable`',
+            inline=False
+        )
+        embed6.add_field(
+            name='$anti-nuke enable/disable',
+            value='Toggle anti-nuke protection (bots, integrations, mass deletes)\n**Example:** `$anti-nuke enable`',
+            inline=False
+        )
+        embed6.set_footer(text='Page 5/6 • Use ◀️ ▶️ to navigate')
+        pages.append(embed6)
+        
+        # Page 6: Advanced Owner Commands
+        embed7 = discord.Embed(title='📚 Help Menu - Advanced Owner Commands', color=COLORS['support'])
+        embed7.description = '**👑 Bot Owner Only**'
+        embed7.add_field(
+            name='$lockdown',
+            value='Lock all text channels (remove send message permission)\n**Example:** `$lockdown`',
+            inline=False
+        )
+        embed7.add_field(
+            name='$unlockdown',
+            value='Unlock all previously locked channels\n**Example:** `$unlockdown`',
+            inline=False
+        )
+        embed7.add_field(
+            name='$channelperm',
+            value='Change permission for a role/member in ONE channel\n**Example:** `$channelperm #general @Members disable use external apps`',
+            inline=False
+        )
+        embed7.add_field(
+            name='$channelpermall',
+            value='Change permission for a role/member in ALL channels\n**Example:** `$channelpermall everyone disable send messages`',
+            inline=False
+        )
+        embed7.add_field(
+            name='$ping',
+            value='Check bot latency\n**Example:** `$ping`',
+            inline=False
+        )
+        embed7.set_footer(text='Page 6/6 • Use ◀️ ▶️ to navigate')
+        pages.append(embed7)
+    else:
+        # Utility page for non-owners
+        embed_util = discord.Embed(title='📚 Help Menu - Utility', color=COLORS['support'])
+        embed_util.add_field(
+            name='$ping',
+            value='Check bot latency\n**Example:** `$ping`',
+            inline=False
+        )
+        if ctx.author.guild_permissions.administrator:
+            embed_util.set_footer(text='Page 5/5 • Use ◀️ ▶️ to navigate')
+        else:
+            embed_util.set_footer(text='Page 3/3 • Use ◀️ ▶️ to navigate')
+        pages.append(embed_util)
+    
+    # Send paginated help
+    view = HelpView(pages, ctx.author.id)
+    await ctx.reply(embed=pages[0], view=view)
+        
 
 @bot.event
 async def on_ready():
