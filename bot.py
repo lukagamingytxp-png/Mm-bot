@@ -1069,6 +1069,176 @@ async def clear_cmd(ctx):
     except:
         pass
 
+@bot.command(name='channelperm')
+@is_owner()
+async def channelperm_cmd(ctx, channel: discord.TextChannel = None, target_input: str = None, action: str = None, *, permission_name: str = None):
+    if not channel or not target_input or not action or not permission_name:
+        return await ctx.reply('❌ Missing arguments\n\nExample: `$channelperm #general @Members disable use external apps`\nExample: `$channelperm #chat everyone enable send messages`')
+    
+    # Parse target (role, member, or @everyone)
+    target = None
+    if target_input.lower() == 'everyone' or target_input == '@everyone':
+        target = ctx.guild.default_role
+    else:
+        # Try to get role or member
+        try:
+            target = await commands.RoleConverter().convert(ctx, target_input)
+        except:
+            try:
+                target = await commands.MemberConverter().convert(ctx, target_input)
+            except:
+                return await ctx.reply('❌ Invalid role/member\n\nUse: `@Role`, `@Member`, or `everyone`')
+    
+    # Parse action
+    if action.lower() not in ['enable', 'disable']:
+        return await ctx.reply('❌ Action must be `enable` or `disable`')
+    
+    # Map permission names to discord.py permission attributes
+    permission_map = {
+        'send messages': 'send_messages',
+        'read messages': 'read_messages',
+        'view channel': 'view_channel',
+        'use external apps': 'use_external_apps',
+        'embed links': 'embed_links',
+        'attach files': 'attach_files',
+        'add reactions': 'add_reactions',
+        'use external emojis': 'use_external_emojis',
+        'use external stickers': 'use_external_stickers',
+        'mention everyone': 'mention_everyone',
+        'manage messages': 'manage_messages',
+        'read message history': 'read_message_history',
+        'send tts messages': 'send_tts_messages',
+        'use application commands': 'use_application_commands',
+        'manage threads': 'manage_threads',
+        'create public threads': 'create_public_threads',
+        'create private threads': 'create_private_threads',
+        'send messages in threads': 'send_messages_in_threads',
+        'connect': 'connect',
+        'speak': 'speak',
+        'stream': 'stream',
+        'use voice activation': 'use_voice_activation',
+        'priority speaker': 'priority_speaker',
+        'mute members': 'mute_members',
+        'deafen members': 'deafen_members',
+        'move members': 'move_members'
+    }
+    
+    perm_key = permission_name.lower().strip()
+    if perm_key not in permission_map:
+        return await ctx.reply(f'❌ Unknown permission: `{permission_name}`\n\nCommon permissions:\n`send messages`, `use external apps`, `embed links`, `attach files`, `add reactions`, `view channel`')
+    
+    perm_attr = permission_map[perm_key]
+    perm_value = True if action.lower() == 'enable' else False
+    
+    # Apply to specific channel
+    try:
+        overwrites = channel.overwrites_for(target)
+        setattr(overwrites, perm_attr, perm_value)
+        await channel.set_permissions(target, overwrite=overwrites)
+        
+        action_text = '✅ Enabled' if perm_value else '🚫 Disabled'
+        target_name = 'everyone' if target == ctx.guild.default_role else target.name
+        
+        embed = discord.Embed(title=f'{action_text} Permission', color=COLORS['success'] if perm_value else COLORS['error'])
+        embed.add_field(name='Channel', value=channel.mention, inline=True)
+        embed.add_field(name='Target', value=f'`{target_name}`', inline=True)
+        embed.add_field(name='Permission', value=f'`{permission_name}`', inline=True)
+        
+        await ctx.reply(embed=embed)
+    except Exception as e:
+        logger.error(f'Failed to update {channel.name}: {e}')
+        await ctx.reply(f'❌ Error: {str(e)}')
+
+@bot.command(name='channelpermall')
+@is_owner()
+async def channelpermall_cmd(ctx, target_input: str = None, action: str = None, *, permission_name: str = None):
+    if not target_input or not action or not permission_name:
+        return await ctx.reply('❌ Missing arguments\n\nExample: `$channelpermall @Members disable use external apps`\nExample: `$channelpermall everyone enable send messages`')
+    
+    # Parse target (role, member, or @everyone)
+    target = None
+    if target_input.lower() == 'everyone' or target_input == '@everyone':
+        target = ctx.guild.default_role
+    else:
+        # Try to get role or member
+        try:
+            target = await commands.RoleConverter().convert(ctx, target_input)
+        except:
+            try:
+                target = await commands.MemberConverter().convert(ctx, target_input)
+            except:
+                return await ctx.reply('❌ Invalid role/member\n\nUse: `@Role`, `@Member`, or `everyone`')
+    
+    # Parse action
+    if action.lower() not in ['enable', 'disable']:
+        return await ctx.reply('❌ Action must be `enable` or `disable`')
+    
+    # Map permission names to discord.py permission attributes
+    permission_map = {
+        'send messages': 'send_messages',
+        'read messages': 'read_messages',
+        'view channel': 'view_channel',
+        'use external apps': 'use_external_apps',
+        'embed links': 'embed_links',
+        'attach files': 'attach_files',
+        'add reactions': 'add_reactions',
+        'use external emojis': 'use_external_emojis',
+        'use external stickers': 'use_external_stickers',
+        'mention everyone': 'mention_everyone',
+        'manage messages': 'manage_messages',
+        'read message history': 'read_message_history',
+        'send tts messages': 'send_tts_messages',
+        'use application commands': 'use_application_commands',
+        'manage threads': 'manage_threads',
+        'create public threads': 'create_public_threads',
+        'create private threads': 'create_private_threads',
+        'send messages in threads': 'send_messages_in_threads',
+        'connect': 'connect',
+        'speak': 'speak',
+        'stream': 'stream',
+        'use voice activation': 'use_voice_activation',
+        'priority speaker': 'priority_speaker',
+        'mute members': 'mute_members',
+        'deafen members': 'deafen_members',
+        'move members': 'move_members'
+    }
+    
+    perm_key = permission_name.lower().strip()
+    if perm_key not in permission_map:
+        return await ctx.reply(f'❌ Unknown permission: `{permission_name}`\n\nCommon permissions:\n`send messages`, `use external apps`, `embed links`, `attach files`, `add reactions`, `view channel`')
+    
+    perm_attr = permission_map[perm_key]
+    perm_value = True if action.lower() == 'enable' else False
+    
+    # Apply to all channels
+    updated = 0
+    failed = 0
+    
+    msg = await ctx.reply(f'⏳ Updating {len(ctx.guild.channels)} channels...')
+    
+    for channel in ctx.guild.channels:
+        try:
+            overwrites = channel.overwrites_for(target)
+            setattr(overwrites, perm_attr, perm_value)
+            await channel.set_permissions(target, overwrite=overwrites)
+            updated += 1
+        except Exception as e:
+            logger.error(f'Failed to update {channel.name}: {e}')
+            failed += 1
+    
+    action_text = '✅ Enabled' if perm_value else '🚫 Disabled'
+    target_name = 'everyone' if target == ctx.guild.default_role else target.name
+    
+    embed = discord.Embed(title=f'{action_text} Permission', color=COLORS['success'] if perm_value else COLORS['error'])
+    embed.add_field(name='Target', value=f'`{target_name}`', inline=True)
+    embed.add_field(name='Permission', value=f'`{permission_name}`', inline=True)
+    embed.add_field(name='Channels Updated', value=f'{updated}/{updated + failed}', inline=True)
+    if failed > 0:
+        embed.set_footer(text=f'{failed} channels failed (check permissions)')
+    
+    await msg.edit(content=None, embed=embed)
+    
+
 @bot.command(name='ping')
 async def ping_cmd(ctx):
     latency = round(bot.latency * 1000)
