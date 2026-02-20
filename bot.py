@@ -718,6 +718,10 @@ async def transfer_cmd(ctx, member: discord.Member = None):
                         target_has_permission = True
             if not target_has_permission:
                 return await ctx.reply(f'❌ {member.mention} doesn\'t have the required role to handle this ticket')
+            # Remove old claimer's permissions (unless they're the owner)
+            old_claimer = ctx.guild.get_member(ticket['claimed_by'])
+            if old_claimer and old_claimer.id != OWNER_ID:
+                await ctx.channel.set_permissions(old_claimer, send_messages=False, read_messages=True)
             # Transfer the ticket
             await conn.execute('UPDATE tickets SET claimed_by = $1 WHERE ticket_id = $2', member.id, ticket['ticket_id'])
         embed = discord.Embed(title='🔄 Ticket Transferred', color=COLORS['support'])
@@ -790,6 +794,12 @@ async def setcategory_cmd(ctx, category: discord.CategoryChannel = None):
         await conn.execute('INSERT INTO config (guild_id, ticket_category_id) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET ticket_category_id = $2', ctx.guild.id, category.id)
     await ctx.reply(embed=discord.Embed(title='✅ Category Set', description=f'{category.mention}', color=COLORS['success']))
 
+@bot.command(name='setlogs')
+@commands.has_permissions(administrator=True)
+async def setlogs_cmd(ctx, channel: discord.TextChannel = None):
+    if not channel: return await ctx.reply('❌ Missing channel\n\nExample: `$setlogs #logs`')
+    async with db.pool.acquire() as conn:
+    
 @bot.command(name='setlogs')
 @commands.has_permissions(administrator=True)
 async def setlogs_cmd(ctx, channel: discord.TextChannel = None):
@@ -1133,6 +1143,7 @@ async def clearwarnings_cmd(ctx, member: discord.Member = None):
     embed = discord.Embed(title='✅ Warnings Cleared', description=f'Cleared **{count}** warning(s) for {member.mention}', color=COLORS['success'])
     await ctx.reply(embed=embed)
 
+
 # ==================== ROLE COMMAND ====================
 
 @bot.command(name='role', aliases=['r'])
@@ -1159,141 +1170,6 @@ async def role_cmd(ctx, member: discord.Member = None, *, role_name: str = None)
         embed.add_field(name='User', value=member.mention, inline=True)
         embed.add_field(name='Role', value=role.mention, inline=True)
     await ctx.reply(embed=embed)
-
-# ==================== BACKUP & RESTORE COMMANDS ====================
-
-@bot.command(name='backup')
-@is_owner()
-async def backup_cmd(ctx):
-    msg = await ctx.reply('⏳ Creating backup...')
-    try:
-        backup_data = {
-            'server_name': ctx.guild.name,
-            'roles': [],
-            'channels': [],
-            'categories': [],
-            'created_at': datetime.utcnow().isoformat()
-        }
-        # Backup roles
-        for role in ctx.guild.roles:
-            if role.name != '@everyone' and not role.managed:
-                backup_data['roles'].append({
-                    'name': role.name,
-                    'color': role.color.value,
-                    'permissions': role.permissions.value,
-                    'hoist': role.hoist,
-                    'mentionable': role.mentionable,
-                    'position': role.position
-                })
-        # Backup categories and channels
-        for category in ctx.guild.categories:
-            backup_data['categories'].append({
-                'name': category.name,
-                'position': category.position
-            })
-        for channel in ctx.guild.channels:
-            channel_data = {
-                'name': channel.name,
-                'type': str(channel.type),
-                'position': channel.position,
-                'category': channel.category.name if channel.category else None
-            }
-            if isinstance(channel, discord.TextChannel):
-                channel_data['topic'] = channel.topic
-                channel_data['slowmode'] = channel.slowmode_delay
-                channel_data['nsfw'] = channel.is_nsfw()
-            backup_data['channels'].append(channel_data)
-        
-        # Save to JSON file
-        filename = f"backup-{ctx.guild.id}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.json"
-        filepath = f"/home/claude/{filename}"
-        with open(filepath, 'w') as f:
-            json.dump(backup_data, f, indent=2)
-        
-        file = discord.File(filepath, filename=filename)
-        embed = discord.Embed(title='✅ Backup Created', color=COLORS['success'])
-        embed.add_field(name='Roles', value=str(len(backup_data['roles'])), inline=True)
-        embed.add_field(name='Channels', value=str(len(backup_data['channels'])), inline=True)
-        embed.add_field(name='Categories', value=str(len(backup_data['categories'])), inline=True)
-        embed.description = f'Backup file: `{filename}`\n\nUse `$restore` with this file to restore'
-        await msg.edit(content=None, embed=embed)
-        await ctx.send(file=file)
-        os.remove(filepath)
-    except Exception as e:
-        await msg.edit(content=f'❌ Backup failed: {str(e)}')
-
-@bot.command(name='restore')
-@is_owner()
-async def restore_cmd(ctx):
-    if not ctx.message.attachments:
-        return await ctx.reply('❌ Please attach a backup JSON file\n\nExample: Upload the backup file and type `$restore` in the message')
-    attachment = ctx.message.attachments[0]
-    if not attachment.filename.endswith('.json'):
-        return await ctx.reply('❌ File must be a .json backup file')
-    
-    msg = await ctx.reply('⏳ Restoring backup...')
-    try:
-        # Download and parse backup
-        filepath = f"/home/claude/{attachment.filename}"
-        await attachment.save(filepath)
-        with open(filepath, 'r') as f:
-            backup_data = json.load(f)
-        
-        restored = {'roles': 0, 'categories': 0, 'channels': 0}
-        
-        # Restore roles
-        for role_data in backup_data.get('roles', []):
-            try:
-                await ctx.guild.create_role(
-                    name=role_data['name'],
-                    color=discord.Color(role_data['color']),
-                    permissions=discord.Permissions(role_data['permissions']),
-                    hoist=role_data['hoist'],
-                    mentionable=role_data['mentionable']
-                )
-                restored['roles'] += 1
-            except: pass
-        
-        # Restore categories
-        category_map = {}
-        for cat_data in backup_data.get('categories', []):
-            try:
-                category = await ctx.guild.create_category(cat_data['name'])
-                category_map[cat_data['name']] = category
-                restored['categories'] += 1
-            except: pass
-        
-        # Restore channels
-        for channel_data in backup_data.get('channels', []):
-            try:
-                category = category_map.get(channel_data.get('category'))
-                if channel_data['type'] == 'text':
-                    await ctx.guild.create_text_channel(
-                        name=channel_data['name'],
-                        category=category,
-                        topic=channel_data.get('topic'),
-                        slowmode_delay=channel_data.get('slowmode', 0),
-                        nsfw=channel_data.get('nsfw', False)
-                    )
-                    restored['channels'] += 1
-                elif channel_data['type'] == 'voice':
-                    await ctx.guild.create_voice_channel(
-                        name=channel_data['name'],
-                        category=category
-                    )
-                    restored['channels'] += 1
-            except: pass
-        
-        os.remove(filepath)
-        embed = discord.Embed(title='✅ Backup Restored', color=COLORS['success'])
-        embed.add_field(name='Roles', value=f"{restored['roles']}/{len(backup_data.get('roles', []))}", inline=True)
-        embed.add_field(name='Categories', value=f"{restored['categories']}/{len(backup_data.get('categories', []))}", inline=True)
-        embed.add_field(name='Channels', value=f"{restored['channels']}/{len(backup_data.get('channels', []))}", inline=True)
-        await msg.edit(content=None, embed=embed)
-    except Exception as e:
-        await msg.edit(content=f'❌ Restore failed: {str(e)}')
-        try: os.remove(filepath)
-        except: pass
 
 # ==================== CHANNEL MANAGEMENT ====================
 
@@ -1567,7 +1443,6 @@ async def anti_nuke_enable(ctx):
 async def anti_nuke_disable(ctx):
     anti_nuke.enabled[ctx.guild.id] = False
     await ctx.reply(embed=discord.Embed(title='🛡️ Anti-Nuke Disabled', color=COLORS['support']))
-
 
 @anti_nuke_group.command(name='status')
 @is_owner()
@@ -1896,40 +1771,6 @@ async def ping_cmd(ctx):
     embed = discord.Embed(title='Pong', description=f'**{latency}ms**', color=color)
     await ctx.reply(embed=embed)
 
-@bot.command(name='google', aliases=['g'])
-async def google_cmd(ctx, *, query: str = None):
-    if not query: return await ctx.reply('❌ Missing search query\n\nExample: `$google discord bots`')
-    search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
-    embed = discord.Embed(title='🔍 Google Search', description=f'**Query:** {query}', color=COLORS['support'])
-    embed.add_field(name='Search Link', value=f'[Click here to view results]({search_url})', inline=False)
-    await ctx.reply(embed=embed)
-
-@bot.command(name='wikipedia', aliases=['wiki'])
-async def wiki_cmd(ctx, *, query: str = None):
-    if not query: return await ctx.reply('❌ Missing search query\n\nExample: `$wiki python programming`')
-    try:
-        search_url = f"https://en.wikipedia.org/w/api.php?action=opensearch&search={query.replace(' ', '%20')}&limit=1&format=json"
-        # Simple search without external library
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(search_url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if len(data) > 1 and len(data[1]) > 0:
-                        title = data[1][0]
-                        summary = data[2][0] if len(data[2]) > 0 else 'No summary available'
-                        url = data[3][0] if len(data[3]) > 0 else f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
-                        
-                        embed = discord.Embed(title=f'📚 {title}', description=summary[:500] + '...' if len(summary) > 500 else summary, color=COLORS['support'])
-                        embed.add_field(name='Full Article', value=f'[Read more on Wikipedia]({url})', inline=False)
-                        await ctx.reply(embed=embed)
-                    else:
-                        await ctx.reply(f'❌ No Wikipedia results found for: **{query}**')
-                else:
-                    await ctx.reply('❌ Wikipedia API request failed')
-    except Exception as e:
-        await ctx.reply(f'❌ Error: {str(e)}')
-
 # ==================== CLEAN HELP COMMAND ====================
 
 class HelpView(View):
@@ -2002,7 +1843,6 @@ async def help_cmd(ctx):
     e2.add_field(name='💬 Social', value='`$afk <reason>` `$afkoff`', inline=False)
     e2.add_field(name='📊 Info', value='`$userinfo` / `$ui` - User info\n`$serverinfo` / `$si` - Server info\n`$roleinfo` / `$ri` - Role info\n`$membercount` / `$mc` - Member count\n`$botinfo` / `$bi` - Bot stats\n`$ping` - Latency', inline=False)
     e2.add_field(name='🖼️ Media', value='`$avatar` / `$av` - User avatar\n`$banner` / `$bn` - User banner', inline=False)
-    e2.add_field(name='🔍 Search', value='`$google` / `$g <query>` - Google\n`$wikipedia` / `$wiki <query>` - Wikipedia', inline=False)
     e2.add_field(name='👀 Snipe', value='`$snipe` / `$sn` - Deleted messages\n`$editsnipe` / `$es` - Edited messages', inline=False)
     e2.set_footer(text=f'Page 2/{total_pages}')
     pages.append(e2)
@@ -2033,8 +1873,6 @@ async def help_cmd(ctx):
         e5.set_footer(text=f'Page 5/{total_pages}')
         pages.append(e5)
 
-
-
     if is_admin:
         # PAGE 6 - Perm Setup
         e6 = discord.Embed(title='⚙️ Permission Setup', description='Administrator only', color=0x5865F2)
@@ -2058,14 +1896,13 @@ async def help_cmd(ctx):
         e8.add_field(name='💬 Anti-Spam', value='`$anti-spam enable/disable/status`', inline=False)
         e8.add_field(name='💣 Anti-Nuke', value='`$anti-nuke enable/disable/status`', inline=False)
         e8.add_field(name='🔐 Server Lock', value='`$lockdown` - Lock all channels\n`$unlockdown` - Unlock all', inline=False)
-        e8.add_field(name='💾 Backup', value='`$backup` - Create server backup\n`$restore` - Restore from backup', inline=False)
         e8.set_footer(text=f'Page 8/{total_pages}')
         pages.append(e8)
 
         # PAGE 9 - Owner Advanced
         e9 = discord.Embed(title='⚙️ Advanced Settings', description='Owner only', color=0x5865F2)
         e9.add_field(name='Channel Permissions', value='`$channelperm #ch @target enable/disable <perm>`\n`$channelpermall @target enable/disable <perm>`', inline=False)
-        e9.add_field(name='Common Shortcuts', value='`$b` ban | `$ub` unban | `$hb` hackban | `$uhb` unhackban\n`$k` kick | `$m` mute | `$um` unmute\n`$w` warn | `$ws` warnings | `$cw` clearwarnings\n`$r` role | `$n` nick | `$sm` slowmode\n`$lk` lock | `$ulk` unlock | `$hd` hide | `$uhd` unhide\n`$av` avatar | `$bn` banner | `$ui` userinfo | `$si` serverinfo\n`$ri` roleinfo | `$mc` membercount | `$bi` botinfo\n`$sn` snipe | `$es` editsnipe | `$g` google\n`$ap` adminperms | `$mp` modperms', inline=False)
+        e9.add_field(name='Common Shortcuts', value='`$b` ban | `$ub` unban | `$hb` hackban | `$uhb` unhackban\n`$k` kick | `$m` mute | `$um` unmute\n`$w` warn | `$ws` warnings | `$cw` clearwarnings\n`$r` role | `$n` nick | `$sm` slowmode\n`$lk` lock | `$ulk` unlock | `$hd` hide | `$uhd` unhide\n`$av` avatar | `$bn` banner | `$ui` userinfo | `$si` serverinfo\n`$ri` roleinfo | `$mc` membercount | `$bi` botinfo\n`$sn` snipe | `$es` editsnipe\n`$ap` adminperms | `$mp` modperms', inline=False)
         e9.set_footer(text=f'Page 9/{total_pages}')
         pages.append(e9)
 
@@ -2209,12 +2046,17 @@ async def on_message(message):
                                 except: pass
                                 return
                     else:
-                        # Ticket IS claimed - only ticket creator and claimer can talk
+                        # Ticket IS claimed - ticket creator, claimer, and added users can talk
                         allowed_users = [ticket['user_id'], ticket['claimed_by']]
+                        # Check if user has channel permissions (was added via $add command)
+                        overwrites = message.channel.overwrites_for(message.author)
+                        if overwrites.send_messages == True:
+                            # They were explicitly added
+                            return
                         if message.author.id not in allowed_users:
                             try:
                                 await message.delete()
-                                await message.channel.send(f'{message.author.mention} Only the ticket creator and claimer can talk in claimed tickets.', delete_after=3)
+                                await message.channel.send(f'{message.author.mention} Only the ticket creator, claimer, and added users can talk in claimed tickets.', delete_after=3)
                             except: pass
                             return
         except Exception as e:
@@ -2276,4 +2118,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
