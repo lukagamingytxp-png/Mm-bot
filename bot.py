@@ -793,12 +793,6 @@ async def setcategory_cmd(ctx, category: discord.CategoryChannel = None):
     async with db.pool.acquire() as conn:
         await conn.execute('INSERT INTO config (guild_id, ticket_category_id) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET ticket_category_id = $2', ctx.guild.id, category.id)
     await ctx.reply(embed=discord.Embed(title='✅ Category Set', description=f'{category.mention}', color=COLORS['success']))
-
-@bot.command(name='setlogs')
-@commands.has_permissions(administrator=True)
-async def setlogs_cmd(ctx, channel: discord.TextChannel = None):
-    if not channel: return await ctx.reply('❌ Missing channel\n\nExample: `$setlogs #logs`')
-    async with db.pool.acquire() as conn:
     
 @bot.command(name='setlogs')
 @commands.has_permissions(administrator=True)
