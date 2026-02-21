@@ -68,13 +68,28 @@ class AntiSpam:
         self.enabled = {}
         self.whitelisted_users = defaultdict(list)
         self.whitelisted_roles = defaultdict(list)
+    
     def add_message(self, guild_id, user_id):
         now = datetime.utcnow()
         self.messages[(guild_id, user_id)].append(now)
-        self.messages[(guild_id, user_id)] = [m for m in self.messages[(guild_id, user_id)] if now - m < timedelta(seconds=2)]
+        self.messages[(guild_id, user_id)] = [m for m in self.messages[(guild_id, user_id)] if now - m < timedelta(seconds=10)]
+    
+    def get_spam_level(self, guild_id, user_id):
+        if not self.enabled.get(guild_id): return 0
+        count = len(self.messages.get((guild_id, user_id), []))
+        return count
+    
     def is_spam(self, guild_id, user_id):
-        if not self.enabled.get(guild_id): return False
-        return len(self.messages.get((guild_id, user_id), [])) >= 3
+        return self.get_spam_level(guild_id, user_id) >= 7
+    
+    def get_timeout_duration(self, guild_id, user_id):
+        count = self.get_spam_level(guild_id, user_id)
+        if count >= 15: return timedelta(minutes=30)
+        elif count >= 12: return timedelta(minutes=15)
+        elif count >= 10: return timedelta(minutes=10)
+        elif count >= 7: return timedelta(minutes=5)
+        return timedelta(minutes=1)
+    
     def is_whitelisted(self, guild_id, member):
         if member.id in self.whitelisted_users.get(guild_id, []):
             return True
@@ -84,6 +99,33 @@ class AntiSpam:
         return False
 
 anti_spam = AntiSpam()
+
+class AntiPing:
+    def __init__(self):
+        self.pings = defaultdict(list)
+        self.enabled = {}
+        self.whitelisted_users = defaultdict(list)
+        self.whitelisted_roles = defaultdict(list)
+    
+    def add_ping(self, guild_id, user_id, mention_count):
+        now = datetime.utcnow()
+        self.pings[(guild_id, user_id)].append((now, mention_count))
+        self.pings[(guild_id, user_id)] = [(t, c) for t, c in self.pings[(guild_id, user_id)] if now - t < timedelta(seconds=10)]
+    
+    def is_ping_spam(self, guild_id, user_id):
+        if not self.enabled.get(guild_id): return False
+        total_pings = sum(count for _, count in self.pings.get((guild_id, user_id), []))
+        return total_pings >= 3
+    
+    def is_whitelisted(self, guild_id, member):
+        if member.id in self.whitelisted_users.get(guild_id, []):
+            return True
+        for role in member.roles:
+            if role.id in self.whitelisted_roles.get(guild_id, []):
+                return True
+        return False
+
+anti_ping = AntiPing()
 
 class AntiLink:
     def __init__(self):
@@ -127,16 +169,26 @@ class AntiNuke:
         return len(self.channel_deletes.get((guild_id, user_id), [])) >= 3
     def add_bot_add(self, guild_id, user_id):
         self.bot_adds[(guild_id, user_id)] = datetime.utcnow()
-    def can_add_bot(self, guild_id, user_id):
+    def can_add_bot(self, guild_id, user_id, user_roles=None):
         if not self.enabled.get(guild_id): return True
-        return user_id in self.whitelisted_users.get(guild_id, [])
+        if user_id in self.whitelisted_users.get(guild_id, []): return True
+        if user_roles:
+            for role in user_roles:
+                if role.id in self.whitelisted_roles.get(guild_id, []):
+                    return True
+        return False
     def add_integration(self, guild_id, user_id):
         now = datetime.utcnow()
         self.integration_adds[(guild_id, user_id)].append(now)
         self.integration_adds[(guild_id, user_id)] = [i for i in self.integration_adds[(guild_id, user_id)] if now - i < timedelta(seconds=10)]
-    def can_add_integration(self, guild_id, user_id):
+    def can_add_integration(self, guild_id, user_id, user_roles=None):
         if not self.enabled.get(guild_id): return True
-        return user_id in self.whitelisted_users.get(guild_id, [])
+        if user_id in self.whitelisted_users.get(guild_id, []): return True
+        if user_roles:
+            for role in user_roles:
+                if role.id in self.whitelisted_roles.get(guild_id, []):
+                    return True
+        return False
     def is_whitelisted(self, guild_id, member):
         if member.id in self.whitelisted_users.get(guild_id, []):
             return True
@@ -449,7 +501,6 @@ class TicketControlView(View):
         except Exception as e:
             logger.error(f'Unclaim error: {e}')
             await interaction.response.send_message(f'❌ Error: {str(e)}', ephemeral=True)
-
 # ==================== TICKET COMMANDS ====================
 
 @bot.command(name='close')
@@ -793,7 +844,7 @@ async def setcategory_cmd(ctx, category: discord.CategoryChannel = None):
     async with db.pool.acquire() as conn:
         await conn.execute('INSERT INTO config (guild_id, ticket_category_id) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET ticket_category_id = $2', ctx.guild.id, category.id)
     await ctx.reply(embed=discord.Embed(title='✅ Category Set', description=f'{category.mention}', color=COLORS['success']))
-    
+
 @bot.command(name='setlogs')
 @commands.has_permissions(administrator=True)
 async def setlogs_cmd(ctx, channel: discord.TextChannel = None):
@@ -1137,7 +1188,6 @@ async def clearwarnings_cmd(ctx, member: discord.Member = None):
     embed = discord.Embed(title='✅ Warnings Cleared', description=f'Cleared **{count}** warning(s) for {member.mention}', color=COLORS['success'])
     await ctx.reply(embed=embed)
 
-
 # ==================== ROLE COMMAND ====================
 
 @bot.command(name='role', aliases=['r'])
@@ -1164,7 +1214,6 @@ async def role_cmd(ctx, member: discord.Member = None, *, role_name: str = None)
         embed.add_field(name='User', value=member.mention, inline=True)
         embed.add_field(name='Role', value=role.mention, inline=True)
     await ctx.reply(embed=embed)
-
 # ==================== CHANNEL MANAGEMENT ====================
 
 @bot.command(name='slowmode', aliases=['sm'])
@@ -1247,7 +1296,7 @@ async def nick_cmd(ctx, member: discord.Member = None, *, nickname: str = None):
 @is_owner()
 async def whitelist_cmd(ctx, protection: str = None, *, target: str = None):
     if not protection or not target:
-        return await ctx.reply('❌ Missing arguments\n\n**Usage:**\n`$whitelist anti-link @Role/@Member`\n`$whitelist anti-spam @Role/@Member`\n`$whitelist anti-nuke @Role/@Member`')
+        return await ctx.reply('❌ Missing arguments\n\n**Usage:**\n`$whitelist anti-link @Role/@Member`\n`$whitelist anti-spam @Role/@Member`\n`$whitelist anti-nuke @Role/@Member`\n`$whitelist anti-ping @Role/@Member`')
     protection = protection.lower()
     role = None
     member = None
@@ -1276,8 +1325,13 @@ async def whitelist_cmd(ctx, protection: str = None, *, target: str = None):
         if target_id in lst[ctx.guild.id]: return await ctx.reply(f'❌ Already whitelisted for anti-nuke')
         lst[ctx.guild.id].append(target_id)
         embed = discord.Embed(title='✅ Anti-Nuke Whitelist Added', description=f'{target_obj.mention} ({target_type}) can now add bots/integrations', color=COLORS['success'])
+    elif protection == 'anti-ping':
+        lst = anti_ping.whitelisted_roles if role else anti_ping.whitelisted_users
+        if target_id in lst[ctx.guild.id]: return await ctx.reply(f'❌ Already whitelisted for anti-ping')
+        lst[ctx.guild.id].append(target_id)
+        embed = discord.Embed(title='✅ Anti-Ping Whitelist Added', description=f'{target_obj.mention} ({target_type}) is exempt from mass ping detection', color=COLORS['success'])
     else:
-        return await ctx.reply('❌ Invalid protection\n\nOptions: `anti-link` `anti-spam` `anti-nuke`')
+        return await ctx.reply('❌ Invalid protection\n\nOptions: `anti-link` `anti-spam` `anti-nuke` `anti-ping`')
     await ctx.reply(embed=embed)
 
 @bot.command(name='unwhitelist')
@@ -1448,6 +1502,38 @@ async def anti_nuke_status(ctx):
     embed.add_field(name='Status', value='✅ Enabled' if enabled else '❌ Disabled', inline=True)
     embed.add_field(name='Whitelisted Users', value=str(wl_users), inline=True)
     embed.add_field(name='Whitelisted Roles', value=str(wl_roles), inline=True)
+    await ctx.reply(embed=embed)
+
+# ==================== ANTI-PING COMMANDS ====================
+
+@bot.group(name='anti-ping', invoke_without_command=True)
+@is_owner()
+async def anti_ping_group(ctx):
+    await ctx.reply('usage: `$anti-ping enable/disable/status`')
+
+@anti_ping_group.command(name='enable')
+@is_owner()
+async def anti_ping_enable(ctx):
+    anti_ping.enabled[ctx.guild.id] = True
+    embed = discord.Embed(title='🛡️ anti-ping enabled', description='3+ mentions in 10 sec = ban\nwebhooks/bots get deleted\nmembers get roles stripped then banned', color=COLORS['success'])
+    await ctx.reply(embed=embed)
+
+@anti_ping_group.command(name='disable')
+@is_owner()
+async def anti_ping_disable(ctx):
+    anti_ping.enabled[ctx.guild.id] = False
+    await ctx.reply(embed=discord.Embed(title='🛡️ anti-ping disabled', color=COLORS['support']))
+
+@anti_ping_group.command(name='status')
+@is_owner()
+async def anti_ping_status(ctx):
+    enabled = anti_ping.enabled.get(ctx.guild.id, False)
+    wl_users = len(anti_ping.whitelisted_users.get(ctx.guild.id, []))
+    wl_roles = len(anti_ping.whitelisted_roles.get(ctx.guild.id, []))
+    embed = discord.Embed(title='🛡️ anti-ping status', color=COLORS['support'])
+    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled', inline=True)
+    embed.add_field(name='trigger', value='3+ pings / 10s', inline=True)
+    embed.add_field(name='whitelisted', value=f'{wl_users} users, {wl_roles} roles', inline=True)
     await ctx.reply(embed=embed)
 
 # ==================== LOCKDOWN COMMANDS ====================
@@ -1623,7 +1709,6 @@ async def modperms_show(ctx):
     role = ctx.guild.get_role(role_id)
     embed = discord.Embed(title='⚙️ Mod Role', description=f'Currently set to: {role.mention if role else "❌ Role not found"}', color=COLORS['support'])
     await ctx.reply(embed=embed)
-
 # ==================== UTILITY COMMANDS ====================
 
 @bot.command(name='afk')
@@ -1953,29 +2038,68 @@ async def on_member_update(before, after):
                         bot_member = entry.target
                         inviter = entry.user
                         if inviter.id == OWNER_ID: return
-                        if not anti_nuke.can_add_bot(after.guild.id, inviter.id):
+                        inviter_member = after.guild.get_member(inviter.id)
+                        inviter_roles = inviter_member.roles if inviter_member else []
+                        if not anti_nuke.can_add_bot(after.guild.id, inviter.id, inviter_roles):
                             try:
-                                await bot_member.kick(reason='Unauthorized bot add (Anti-Nuke)')
-                                await inviter.ban(reason='Added bot without permission (Anti-Nuke)')
-                            except: pass
+                                await bot_member.kick(reason='unauthorized bot add')
+                                await inviter.ban(reason='added bot without permission')
+                                logger.info(f'anti-nuke: kicked bot {bot_member} and banned {inviter}')
+                            except Exception as e:
+                                logger.error(f'anti-nuke bot kick failed: {e}')
                         break
 
 @bot.event
 async def on_integration_create(integration):
     if not anti_nuke.enabled.get(integration.guild.id): return
     try:
-        async for entry in integration.guild.audit_logs(limit=1, action=discord.AuditLogAction.integration_create):
+        await asyncio.sleep(1)
+        async for entry in integration.guild.audit_logs(limit=1, action=discord.AuditLogAction.webhook_create):
             creator = entry.user
             if creator.id == OWNER_ID: return
-            if not anti_nuke.can_add_integration(integration.guild.id, creator.id):
+            creator_member = integration.guild.get_member(creator.id)
+            creator_roles = creator_member.roles if creator_member else []
+            if not anti_nuke.can_add_integration(integration.guild.id, creator.id, creator_roles):
                 try:
-                    await integration.delete()
-                    await creator.ban(reason='Unauthorized integration (Anti-Nuke)')
+                    # Delete the webhook
+                    webhooks = await integration.guild.webhooks()
+                    for webhook in webhooks:
+                        if webhook.user and webhook.user.id == bot.user.id:
+                            await webhook.delete(reason='anti-nuke')
+                    # Ban creator
+                    await creator.ban(reason='unauthorized webhook')
+                    logger.info(f'anti-nuke: deleted webhook and banned {creator}')
                 except Exception as e:
-                    logger.error(f'Integration error: {e}')
+                    logger.error(f'anti-nuke webhook delete failed: {e}')
             break
     except Exception as e:
-        logger.error(f'Integration create event error: {e}')
+        logger.error(f'webhook create event error: {e}')
+
+@bot.event
+async def on_webhooks_update(channel):
+    if not anti_nuke.enabled.get(channel.guild.id): return
+    try:
+        await asyncio.sleep(0.5)
+        async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.webhook_create):
+            creator = entry.user
+            if creator.id == OWNER_ID: return
+            creator_member = channel.guild.get_member(creator.id)
+            creator_roles = creator_member.roles if creator_member else []
+            if not anti_nuke.can_add_integration(channel.guild.id, creator.id, creator_roles):
+                try:
+                    webhooks = await channel.webhooks()
+                    for webhook in webhooks:
+                        try:
+                            await webhook.delete(reason='anti-nuke')
+                            logger.info(f'anti-nuke: deleted webhook in {channel.name}')
+                        except: pass
+                    await creator.ban(reason='unauthorized webhook')
+                    logger.info(f'anti-nuke: banned {creator} for webhook')
+                except Exception as e:
+                    logger.error(f'anti-nuke webhook ban failed: {e}')
+            break
+    except Exception as e:
+        logger.error(f'webhooks update event error: {e}')
 
 @bot.event
 async def on_guild_channel_delete(channel):
@@ -2062,8 +2186,14 @@ async def on_message(message):
         if anti_spam.is_spam(message.guild.id, message.author.id):
             try:
                 await message.delete()
-                await message.channel.send(f'{message.author.mention} Stop spamming!', delete_after=3)
-            except: pass
+                timeout_duration = anti_spam.get_timeout_duration(message.guild.id, message.author.id)
+                spam_count = anti_spam.get_spam_level(message.guild.id, message.author.id)
+                await message.author.timeout(timeout_duration, reason=f'spamming ({spam_count} msgs in 10s)')
+                minutes = int(timeout_duration.total_seconds() / 60)
+                await message.channel.send(f'{message.author.mention} timed out for {minutes} min for spamming', delete_after=5)
+                logger.info(f'anti-spam: timed out {message.author} for {minutes} min ({spam_count} messages)')
+            except Exception as e:
+                logger.error(f'anti-spam timeout failed: {e}')
             return
 
     # Anti-link
@@ -2073,8 +2203,50 @@ async def on_message(message):
                 if not anti_link.is_user_whitelisted(message.guild.id, message.author):
                     try:
                         await message.delete()
-                        await message.channel.send(f'{message.author.mention} Links are not allowed!', delete_after=3)
+                        await message.channel.send(f'{message.author.mention} no links allowed', delete_after=3)
                     except: pass
+                    return
+    
+    # Anti-ping
+    if anti_ping.enabled.get(message.guild.id):
+        mention_count = len(message.mentions)
+        if mention_count > 0:
+            if not anti_ping.is_whitelisted(message.guild.id, message.author):
+                anti_ping.add_ping(message.guild.id, message.author.id, mention_count)
+                if anti_ping.is_ping_spam(message.guild.id, message.author.id):
+                    try:
+                        await message.delete()
+                        # Check if webhook
+                        if message.webhook_id:
+                            webhooks = await message.channel.webhooks()
+                            for webhook in webhooks:
+                                if webhook.id == message.webhook_id:
+                                    await webhook.delete(reason='mass ping spam')
+                                    break
+                            await message.channel.send('deleted webhook for mass pinging', delete_after=5)
+                            return
+                        # Check if bot
+                        if message.author.bot:
+                            try:
+                                await message.author.ban(reason='bot mass ping spam')
+                                await message.channel.send(f'banned bot {message.author} for mass pinging', delete_after=5)
+                            except: pass
+                            return
+                        # Regular member - strip roles and ban
+                        try:
+                            saved_roles = [r.id for r in message.author.roles if r.id != message.guild.id]
+                            for role in message.author.roles:
+                                if role.id != message.guild.id:
+                                    try:
+                                        await message.author.remove_roles(role)
+                                    except: pass
+                            await message.author.ban(reason='mass ping spam (3+ pings in 10s)')
+                            await message.channel.send(f'banned {message.author} for mass pinging', delete_after=5)
+                            logger.info(f'anti-ping: banned {message.author} for mass pinging')
+                        except Exception as e:
+                            logger.error(f'anti-ping ban failed: {e}')
+                    except Exception as e:
+                        logger.error(f'anti-ping error: {e}')
                     return
 
     await bot.process_commands(message)
