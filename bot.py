@@ -2033,6 +2033,7 @@ async def on_member_update(before, after):
         new_role = set(after.roles) - set(before.roles)
         for role in new_role:
             if role.managed:
+                # INSTANT detection when bot role is added
                 async for entry in after.guild.audit_logs(limit=5, action=discord.AuditLogAction.bot_add):
                     if entry.target and entry.target.bot:
                         bot_member = entry.target
@@ -2042,9 +2043,9 @@ async def on_member_update(before, after):
                         inviter_roles = inviter_member.roles if inviter_member else []
                         if not anti_nuke.can_add_bot(after.guild.id, inviter.id, inviter_roles):
                             try:
-                                await bot_member.kick(reason='unauthorized bot add')
-                                await inviter.ban(reason='added bot without permission')
-                                logger.info(f'anti-nuke: kicked bot {bot_member} and banned {inviter}')
+                                await bot_member.kick(reason='anti-nuke: unauthorized bot')
+                                await inviter.ban(reason='anti-nuke: added bot without permission')
+                                logger.info(f'anti-nuke: INSTANT kicked bot {bot_member} and banned {inviter}')
                             except Exception as e:
                                 logger.error(f'anti-nuke bot kick failed: {e}')
                         break
@@ -2053,7 +2054,7 @@ async def on_member_update(before, after):
 async def on_integration_create(integration):
     if not anti_nuke.enabled.get(integration.guild.id): return
     try:
-        await asyncio.sleep(1)
+        # Check immediately - no delay
         async for entry in integration.guild.audit_logs(limit=1, action=discord.AuditLogAction.webhook_create):
             creator = entry.user
             if creator.id == OWNER_ID: return
@@ -2065,21 +2066,21 @@ async def on_integration_create(integration):
                     webhooks = await integration.guild.webhooks()
                     for webhook in webhooks:
                         if webhook.user and webhook.user.id == bot.user.id:
-                            await webhook.delete(reason='anti-nuke')
+                            await webhook.delete(reason='anti-nuke: unauthorized')
                     # Ban creator
-                    await creator.ban(reason='unauthorized webhook')
-                    logger.info(f'anti-nuke: deleted webhook and banned {creator}')
+                    await creator.ban(reason='anti-nuke: unauthorized webhook/integration')
+                    logger.info(f'anti-nuke: INSTANT deleted integration and banned {creator}')
                 except Exception as e:
-                    logger.error(f'anti-nuke webhook delete failed: {e}')
+                    logger.error(f'anti-nuke integration delete failed: {e}')
             break
     except Exception as e:
-        logger.error(f'webhook create event error: {e}')
+        logger.error(f'integration create event error: {e}')
 
 @bot.event
 async def on_webhooks_update(channel):
     if not anti_nuke.enabled.get(channel.guild.id): return
     try:
-        await asyncio.sleep(0.5)
+        # Check immediately - no delay
         async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.webhook_create):
             creator = entry.user
             if creator.id == OWNER_ID: return
@@ -2090,11 +2091,11 @@ async def on_webhooks_update(channel):
                     webhooks = await channel.webhooks()
                     for webhook in webhooks:
                         try:
-                            await webhook.delete(reason='anti-nuke')
-                            logger.info(f'anti-nuke: deleted webhook in {channel.name}')
+                            await webhook.delete(reason='anti-nuke: unauthorized webhook')
+                            logger.info(f'anti-nuke: INSTANT deleted webhook {webhook.name} in {channel.name}')
                         except: pass
-                    await creator.ban(reason='unauthorized webhook')
-                    logger.info(f'anti-nuke: banned {creator} for webhook')
+                    await creator.ban(reason='anti-nuke: unauthorized webhook')
+                    logger.info(f'anti-nuke: INSTANT banned {creator} for webhook')
                 except Exception as e:
                     logger.error(f'anti-nuke webhook ban failed: {e}')
             break
@@ -2103,13 +2104,17 @@ async def on_webhooks_update(channel):
 
 @bot.event
 async def on_guild_channel_delete(channel):
+    # INSTANT detection when channel is deleted
     async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
         deleter = entry.user
         if deleter.id == OWNER_ID: return
         anti_nuke.add_channel_delete(channel.guild.id, deleter.id)
         if anti_nuke.is_nuke(channel.guild.id, deleter.id):
-            try: await deleter.ban(reason='Mass channel deletion (Anti-Nuke)')
-            except: pass
+            try:
+                await deleter.ban(reason='anti-nuke: mass channel deletion')
+                logger.info(f'anti-nuke: INSTANT banned {deleter} for mass channel deletion')
+            except Exception as e:
+                logger.error(f'anti-nuke channel delete ban failed: {e}')
         break
 
 @bot.event
@@ -2141,12 +2146,12 @@ async def on_message(message):
             async with db.pool.acquire() as conn:
                 ticket = await conn.fetchrow('SELECT * FROM tickets WHERE channel_id = $1', message.channel.id)
                 if ticket:
-                    # Owner can always talk
-                    if message.author.id == OWNER_ID:
-                        return
-                    # If ticket is NOT claimed, allow ticket creator to talk
+                    # If ticket is NOT claimed
                     if not ticket['claimed_by']:
-                        if message.author.id != ticket['user_id']:
+                        # Owner can talk in unclaimed tickets
+                        if message.author.id == OWNER_ID:
+                            pass  # Continue to anti checks below
+                        elif message.author.id != ticket['user_id']:
                             # Check if they have staff role or tier role
                             has_permission = False
                             staff_role = message.guild.get_role(HARDCODED_ROLES['staff'])
@@ -2160,27 +2165,29 @@ async def on_message(message):
                             if not has_permission:
                                 try:
                                     await message.delete()
-                                    await message.channel.send(f'{message.author.mention} You cannot send messages in this ticket.', delete_after=3)
+                                    await message.channel.send(f'{message.author.mention} you can\'t talk here', delete_after=3)
                                 except: pass
                                 return
                     else:
-                        # Ticket IS claimed - ticket creator, claimer, and added users can talk
+                        # Ticket IS claimed - only ticket creator, claimer, and NEWLY added users can talk
+                        # Owner CANNOT talk after claimed
                         allowed_users = [ticket['user_id'], ticket['claimed_by']]
-                        # Check if user has channel permissions (was added via $add command)
+                        
+                        # Check if user was EXPLICITLY added via $add command (has channel override)
                         overwrites = message.channel.overwrites_for(message.author)
                         if overwrites.send_messages == True:
-                            # They were explicitly added
-                            return
-                        if message.author.id not in allowed_users:
+                            # They were added after claim, let them talk
+                            pass  # Continue to anti checks below
+                        elif message.author.id not in allowed_users:
                             try:
                                 await message.delete()
-                                await message.channel.send(f'{message.author.mention} Only the ticket creator, claimer, and added users can talk in claimed tickets.', delete_after=3)
+                                await message.channel.send(f'{message.author.mention} only ticket creator, claimer, and added users can talk here', delete_after=3)
                             except: pass
                             return
         except Exception as e:
-            logger.error(f'Ticket filter error: {e}')
+            logger.error(f'ticket filter error: {e}')
 
-    # Anti-spam
+    # Anti-spam (runs in tickets too)
     if not anti_spam.is_whitelisted(message.guild.id, message.author):
         anti_spam.add_message(message.guild.id, message.author.id)
         if anti_spam.is_spam(message.guild.id, message.author.id):
@@ -2196,7 +2203,7 @@ async def on_message(message):
                 logger.error(f'anti-spam timeout failed: {e}')
             return
 
-    # Anti-link
+    # Anti-link (runs in tickets too)
     if anti_link.enabled.get(message.guild.id):
         if anti_link.is_link(message.content):
             if not anti_link.is_url_whitelisted(message.guild.id, message.content):
