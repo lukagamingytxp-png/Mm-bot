@@ -155,20 +155,56 @@ class AntiNuke:
     def __init__(self):
         self.enabled = {}
         self.channel_deletes = defaultdict(list)
-        self.bot_adds = defaultdict(list)
-        self.integration_adds = defaultdict(list)
+        self.bans = defaultdict(list)
+        self.kicks = defaultdict(list)
+        self.role_deletes = defaultdict(list)
+        self.channel_creates = defaultdict(list)
         self.whitelisted_users = defaultdict(list)
         self.whitelisted_roles = defaultdict(list)
+    
     def add_channel_delete(self, guild_id, user_id):
         now = datetime.utcnow()
         self.channel_deletes[(guild_id, user_id)].append(now)
-        self.channel_deletes[(guild_id, user_id)] = [d for d in self.channel_deletes[(guild_id, user_id)] if now - d < timedelta(seconds=5)]
+        self.channel_deletes[(guild_id, user_id)] = [d for d in self.channel_deletes[(guild_id, user_id)] if now - d < timedelta(seconds=10)]
+    
+    def add_ban(self, guild_id, user_id):
+        now = datetime.utcnow()
+        self.bans[(guild_id, user_id)].append(now)
+        self.bans[(guild_id, user_id)] = [b for b in self.bans[(guild_id, user_id)] if now - b < timedelta(seconds=10)]
+    
+    def add_kick(self, guild_id, user_id):
+        now = datetime.utcnow()
+        self.kicks[(guild_id, user_id)].append(now)
+        self.kicks[(guild_id, user_id)] = [k for k in self.kicks[(guild_id, user_id)] if now - k < timedelta(seconds=10)]
+    
+    def add_role_delete(self, guild_id, user_id):
+        now = datetime.utcnow()
+        self.role_deletes[(guild_id, user_id)].append(now)
+        self.role_deletes[(guild_id, user_id)] = [r for r in self.role_deletes[(guild_id, user_id)] if now - r < timedelta(seconds=10)]
+    
+    def add_channel_create(self, guild_id, user_id):
+        now = datetime.utcnow()
+        self.channel_creates[(guild_id, user_id)].append(now)
+        self.channel_creates[(guild_id, user_id)] = [c for c in self.channel_creates[(guild_id, user_id)] if now - c < timedelta(seconds=10)]
+    
     def is_nuke(self, guild_id, user_id):
         if not self.enabled.get(guild_id): return False
         if user_id in self.whitelisted_users.get(guild_id, []): return False
-        return len(self.channel_deletes.get((guild_id, user_id), [])) >= 3
-    def add_bot_add(self, guild_id, user_id):
-        self.bot_adds[(guild_id, user_id)] = datetime.utcnow()
+        
+        # Check any mass action
+        channel_dels = len(self.channel_deletes.get((guild_id, user_id), []))
+        bans_count = len(self.bans.get((guild_id, user_id), []))
+        kicks_count = len(self.kicks.get((guild_id, user_id), []))
+        role_dels = len(self.role_deletes.get((guild_id, user_id), []))
+        channel_creates = len(self.channel_creates.get((guild_id, user_id), []))
+        
+        # 3+ of any action in 10 seconds = nuke
+        return (channel_dels >= 3 or bans_count >= 3 or kicks_count >= 3 or 
+                role_dels >= 3 or channel_creates >= 5)
+    
+    def is_whitelisted(self, guild_id, user_id):
+        return user_id in self.whitelisted_users.get(guild_id, [])
+    
     def can_add_bot(self, guild_id, user_id, user_roles=None):
         if not self.enabled.get(guild_id): return True
         if user_id in self.whitelisted_users.get(guild_id, []): return True
@@ -177,10 +213,7 @@ class AntiNuke:
                 if role.id in self.whitelisted_roles.get(guild_id, []):
                     return True
         return False
-    def add_integration(self, guild_id, user_id):
-        now = datetime.utcnow()
-        self.integration_adds[(guild_id, user_id)].append(now)
-        self.integration_adds[(guild_id, user_id)] = [i for i in self.integration_adds[(guild_id, user_id)] if now - i < timedelta(seconds=10)]
+    
     def can_add_integration(self, guild_id, user_id, user_roles=None):
         if not self.enabled.get(guild_id): return True
         if user_id in self.whitelisted_users.get(guild_id, []): return True
@@ -188,13 +221,6 @@ class AntiNuke:
             for role in user_roles:
                 if role.id in self.whitelisted_roles.get(guild_id, []):
                     return True
-        return False
-    def is_whitelisted(self, guild_id, member):
-        if member.id in self.whitelisted_users.get(guild_id, []):
-            return True
-        for role in member.roles:
-            if role.id in self.whitelisted_roles.get(guild_id, []):
-                return True
         return False
 
 anti_nuke = AntiNuke()
@@ -2033,19 +2059,19 @@ async def on_member_update(before, after):
         new_role = set(after.roles) - set(before.roles)
         for role in new_role:
             if role.managed:
-                # INSTANT detection when bot role is added
-                async for entry in after.guild.audit_logs(limit=5, action=discord.AuditLogAction.bot_add):
-                    if entry.target and entry.target.bot:
-                        bot_member = entry.target
+                # Bot role detected - find who added THIS specific bot
+                async for entry in after.guild.audit_logs(limit=10, action=discord.AuditLogAction.bot_add):
+                    # CRITICAL FIX: Match the entry.target to the member who just got the role
+                    if entry.target and entry.target.id == after.id and entry.target.bot:
                         inviter = entry.user
                         if inviter.id == OWNER_ID: return
                         inviter_member = after.guild.get_member(inviter.id)
                         inviter_roles = inviter_member.roles if inviter_member else []
                         if not anti_nuke.can_add_bot(after.guild.id, inviter.id, inviter_roles):
                             try:
-                                await bot_member.kick(reason='anti-nuke: unauthorized bot')
+                                await after.kick(reason='anti-nuke: unauthorized bot')
                                 await inviter.ban(reason='anti-nuke: added bot without permission')
-                                logger.info(f'anti-nuke: INSTANT kicked bot {bot_member} and banned {inviter}')
+                                logger.info(f'anti-nuke: INSTANT kicked bot {after} (added by {inviter})')
                             except Exception as e:
                                 logger.error(f'anti-nuke bot kick failed: {e}')
                         break
@@ -2104,10 +2130,12 @@ async def on_webhooks_update(channel):
 
 @bot.event
 async def on_guild_channel_delete(channel):
+    if not anti_nuke.enabled.get(channel.guild.id): return
     # INSTANT detection when channel is deleted
     async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
         deleter = entry.user
         if deleter.id == OWNER_ID: return
+        if anti_nuke.is_whitelisted(channel.guild.id, deleter.id): return
         anti_nuke.add_channel_delete(channel.guild.id, deleter.id)
         if anti_nuke.is_nuke(channel.guild.id, deleter.id):
             try:
@@ -2115,6 +2143,108 @@ async def on_guild_channel_delete(channel):
                 logger.info(f'anti-nuke: INSTANT banned {deleter} for mass channel deletion')
             except Exception as e:
                 logger.error(f'anti-nuke channel delete ban failed: {e}')
+        break
+
+@bot.event
+async def on_member_ban(guild, user):
+    if not anti_nuke.enabled.get(guild.id): return
+    # INSTANT detection when someone is banned
+    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
+        banner = entry.user
+        if banner.id == OWNER_ID: return
+        if banner.id == bot.user.id: return  # Ignore bot's own bans
+        if anti_nuke.is_whitelisted(guild.id, banner.id): return
+        anti_nuke.add_ban(guild.id, banner.id)
+        if anti_nuke.is_nuke(guild.id, banner.id):
+            try:
+                # Strip all roles first
+                banner_member = guild.get_member(banner.id)
+                if banner_member:
+                    for role in banner_member.roles:
+                        if role.id != guild.id:
+                            try:
+                                await banner_member.remove_roles(role)
+                            except: pass
+                # Then ban
+                await banner_member.ban(reason='anti-nuke: mass banning users')
+                logger.info(f'anti-nuke: INSTANT stripped roles and banned {banner} for mass banning')
+            except Exception as e:
+                logger.error(f'anti-nuke ban detection failed: {e}')
+        break
+
+@bot.event
+async def on_member_remove(member):
+    if not anti_nuke.enabled.get(member.guild.id): return
+    # Check if it was a kick
+    async for entry in member.guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
+        if entry.target.id == member.id:
+            kicker = entry.user
+            if kicker.id == OWNER_ID: return
+            if kicker.id == bot.user.id: return  # Ignore bot's own kicks
+            if anti_nuke.is_whitelisted(member.guild.id, kicker.id): return
+            anti_nuke.add_kick(member.guild.id, kicker.id)
+            if anti_nuke.is_nuke(member.guild.id, kicker.id):
+                try:
+                    # Strip roles and ban
+                    kicker_member = member.guild.get_member(kicker.id)
+                    if kicker_member:
+                        for role in kicker_member.roles:
+                            if role.id != member.guild.id:
+                                try:
+                                    await kicker_member.remove_roles(role)
+                                except: pass
+                        await kicker_member.ban(reason='anti-nuke: mass kicking users')
+                        logger.info(f'anti-nuke: INSTANT stripped roles and banned {kicker} for mass kicking')
+                except Exception as e:
+                    logger.error(f'anti-nuke kick detection failed: {e}')
+            break
+
+@bot.event
+async def on_guild_role_delete(role):
+    if not anti_nuke.enabled.get(role.guild.id): return
+    # INSTANT detection when role is deleted
+    async for entry in role.guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
+        deleter = entry.user
+        if deleter.id == OWNER_ID: return
+        if anti_nuke.is_whitelisted(role.guild.id, deleter.id): return
+        anti_nuke.add_role_delete(role.guild.id, deleter.id)
+        if anti_nuke.is_nuke(role.guild.id, deleter.id):
+            try:
+                deleter_member = role.guild.get_member(deleter.id)
+                if deleter_member:
+                    for r in deleter_member.roles:
+                        if r.id != role.guild.id:
+                            try:
+                                await deleter_member.remove_roles(r)
+                            except: pass
+                    await deleter_member.ban(reason='anti-nuke: mass role deletion')
+                    logger.info(f'anti-nuke: INSTANT stripped roles and banned {deleter} for mass role deletion')
+            except Exception as e:
+                logger.error(f'anti-nuke role delete ban failed: {e}')
+        break
+
+@bot.event
+async def on_guild_channel_create(channel):
+    if not anti_nuke.enabled.get(channel.guild.id): return
+    # Detect mass channel spam
+    async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_create):
+        creator = entry.user
+        if creator.id == OWNER_ID: return
+        if anti_nuke.is_whitelisted(channel.guild.id, creator.id): return
+        anti_nuke.add_channel_create(channel.guild.id, creator.id)
+        if anti_nuke.is_nuke(channel.guild.id, creator.id):
+            try:
+                creator_member = channel.guild.get_member(creator.id)
+                if creator_member:
+                    for role in creator_member.roles:
+                        if role.id != channel.guild.id:
+                            try:
+                                await creator_member.remove_roles(role)
+                            except: pass
+                    await creator_member.ban(reason='anti-nuke: mass channel spam')
+                    logger.info(f'anti-nuke: INSTANT stripped roles and banned {creator} for mass channel creation')
+            except Exception as e:
+                logger.error(f'anti-nuke channel create ban failed: {e}')
         break
 
 @bot.event
