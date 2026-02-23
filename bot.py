@@ -3,7 +3,7 @@ from discord.ext import commands
 from discord.ui import Button, View, Select, Modal, TextInput
 import os
 import asyncpg
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from aiohttp import web
 import logging
 import random
@@ -47,14 +47,14 @@ snipe_data = {}
 edit_snipe_data = {}
 mod_perms = {}
 admin_perms = {}
-bot_start_time = datetime.utcnow()
+bot_start_time = datetime.now(timezone.utc)
 
 class RateLimiter:
     def __init__(self):
         self.cooldowns = defaultdict(float)
     def check_cooldown(self, user_id: int, command: str, cooldown: int = 3) -> bool:
         key = f"{user_id}:{command}"
-        now = datetime.utcnow().timestamp()
+        now = datetime.now(timezone.utc).timestamp()
         if key in self.cooldowns and now - self.cooldowns[key] < cooldown:
             return False
         self.cooldowns[key] = now
@@ -63,69 +63,70 @@ class RateLimiter:
 rate_limiter = RateLimiter()
 
 
+# ALL ANTI-PROTECTION SYSTEMS
+# Anti-Nuke, Anti-Raid, Anti-Spam, Anti-Link, Anti-React
+
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+
+# ANTI-LINK - Blocks all links unless whitelisted
 class AntiLink:
     def __init__(self):
         self.enabled = {}
-        self.whitelist = defaultdict(list)
-        self.whitelisted_users = defaultdict(list)
         self.whitelisted_roles = defaultdict(list)
+        self.whitelisted_urls = defaultdict(list)
+    
     def is_link(self, content):
-        url_pattern = re.compile(r'https?://|discord\.gg/|\.com|\.net|\.org')
+        url_pattern = re.compile(r'https?://|discord\.gg/|\.com|\.net|\.org|\.gg|\.io')
         return url_pattern.search(content) is not None
+    
     def is_url_whitelisted(self, guild_id, content):
-        for wl in self.whitelist.get(guild_id, []):
-            if wl.lower() in content.lower():
+        for url in self.whitelisted_urls.get(guild_id, []):
+            if url.lower() in content.lower():
                 return True
         return False
-    def is_user_whitelisted(self, guild_id, member):
-        if member.id in self.whitelisted_users.get(guild_id, []):
-            return True
+    
+    def is_whitelisted(self, member):
         for role in member.roles:
-            if role.id in self.whitelisted_roles.get(guild_id, []):
+            if role.id in self.whitelisted_roles.get(member.guild.id, []):
                 return True
         return False
 
 anti_link = AntiLink()
 
-
-# COMPLETE ANTI-NUKE SYSTEM - LIKE SOLITARY++/WICK
-# This goes after the AntiLink class
-
+# ANTI-NUKE - Mass actions, unauthorized bots/webhooks  
 class AntiNuke:
     def __init__(self):
         self.enabled = {}
         self.whitelisted_roles = defaultdict(list)
-        # Track actions - CLEARS ON BOT RESTART
         self.channel_deletes = defaultdict(list)
         self.bans = defaultdict(list)
         self.kicks = defaultdict(list)
         self.role_deletes = defaultdict(list)
         self.channel_creates = defaultdict(list)
-        self.bot_start_time = datetime.utcnow()
+        self.bot_start_time = datetime.now(timezone.utc)
     
     def is_recent(self, timestamp):
-        """Only process actions from last 3 seconds"""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if timestamp.tzinfo:
             timestamp = timestamp.replace(tzinfo=None)
-        return (now - timestamp).total_seconds() < 3
+        return (now.replace(tzinfo=None) - timestamp).total_seconds() < 3
     
     def is_after_restart(self, timestamp):
-        """Ignore anything before bot started"""
         if timestamp.tzinfo:
             timestamp = timestamp.replace(tzinfo=None)
-        return timestamp > self.bot_start_time
+        bot_time = self.bot_start_time.replace(tzinfo=None)
+        return timestamp > bot_time
     
     def add_action(self, guild_id, user_id, action_type):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         storage = getattr(self, action_type)
         storage[(guild_id, user_id)].append(now)
-        # Keep only last 10 seconds
-        storage[(guild_id, user_id)] = [t for t in storage[(guild_id, user_id)] if (now - t).total_seconds() < 10]
+        storage[(guild_id, user_id)] = [t for t in storage[(guild_id, user_id)] 
+                                        if (now - t).total_seconds() < 10]
     
     def check_nuke(self, guild_id, user_id):
         if not self.enabled.get(guild_id): return False
-        
         counts = {
             'channel_deletes': len(self.channel_deletes.get((guild_id, user_id), [])),
             'bans': len(self.bans.get((guild_id, user_id), [])),
@@ -133,71 +134,74 @@ class AntiNuke:
             'role_deletes': len(self.role_deletes.get((guild_id, user_id), [])),
             'channel_creates': len(self.channel_creates.get((guild_id, user_id), []))
         }
-        
         return (counts['channel_deletes'] >= 3 or counts['bans'] >= 3 or 
                 counts['kicks'] >= 3 or counts['role_deletes'] >= 3 or 
                 counts['channel_creates'] >= 5)
     
-    def is_whitelisted(self, guild_id, member):
+    def is_whitelisted(self, member):
         if not member: return False
         for role in member.roles:
-            if role.id in self.whitelisted_roles.get(guild_id, []):
+            if role.id in self.whitelisted_roles.get(member.guild.id, []):
                 return True
         return False
 
+
+    def is_recent_and_matches(self, entry, target_id):
+        """Triple check: recent, after restart, target matches"""
+        now = datetime.now(timezone.utc)
+        entry_time = entry.created_at.replace(tzinfo=None) if entry.created_at.tzinfo else entry.created_at
+        bot_time = self.bot_start_time.replace(tzinfo=None) if self.bot_start_time.tzinfo else self.bot_start_time
+        now_naive = now.replace(tzinfo=None)
+        
+        time_diff = (now_naive - entry_time).total_seconds()
+        if time_diff > 3:
+            return False
+        if entry_time < bot_time:
+            return False
+        if hasattr(entry.target, 'id') and entry.target.id != target_id:
+            return False
+        return True
+
 anti_nuke = AntiNuke()
 
-
-# ANTI-RAID SYSTEM - Detects join spam, new accounts, no avatar
+# ANTI-RAID - Join spam, new accounts, no avatar
 class AntiRaid:
     def __init__(self):
         self.enabled = {}
         self.join_tracking = defaultdict(list)
         self.whitelisted_roles = defaultdict(list)
-        
-        # Configurable settings per guild
         self.settings = defaultdict(lambda: {
-            'max_joins': 10,  # Max joins in time window
-            'time_window': 10,  # Seconds
-            'min_account_age': 7,  # Days
+            'max_joins': 10,
+            'time_window': 10,
+            'min_account_age': 7,
             'require_avatar': True,
-            'action': 'kick'  # kick, ban, or quarantine
+            'action': 'kick'
         })
     
     def add_join(self, guild_id, user_id):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         self.join_tracking[guild_id].append((user_id, now))
-        # Keep only last minute
         self.join_tracking[guild_id] = [(uid, t) for uid, t in self.join_tracking[guild_id] 
                                         if (now - t).total_seconds() < 60]
     
     def is_raid(self, guild_id):
         if not self.enabled.get(guild_id): return False
         settings = self.settings[guild_id]
-        now = datetime.utcnow()
-        
-        recent_joins = [(uid, t) for uid, t in self.join_tracking[guild_id] 
-                       if (now - t).total_seconds() < settings['time_window']]
-        
-        return len(recent_joins) >= settings['max_joins']
+        now = datetime.now(timezone.utc)
+        recent = [(uid, t) for uid, t in self.join_tracking[guild_id] 
+                 if (now - t).total_seconds() < settings['time_window']]
+        return len(recent) >= settings['max_joins']
     
     def check_member(self, member):
-        """Check if member is suspicious"""
         guild_id = member.guild.id
         if not self.enabled.get(guild_id): return False, None
-        
         settings = self.settings[guild_id]
         reasons = []
-        
-        # Check account age
-        account_age = (datetime.utcnow() - member.created_at.replace(tzinfo=None)).days
+        account_age = (datetime.now(timezone.utc) - member.created_at.replace(tzinfo=None)).days
         if account_age < settings['min_account_age']:
-            reasons.append(f"account only {account_age} days old")
-        
-        # Check avatar
+            reasons.append(f"account {account_age} days old")
         if settings['require_avatar'] and member.avatar is None:
             reasons.append("no avatar")
-        
         return len(reasons) > 0, reasons
     
     def is_whitelisted(self, member):
@@ -208,58 +212,49 @@ class AntiRaid:
 
 anti_raid = AntiRaid()
 
-# ANTI-SPAM SYSTEM - Message spam, emoji spam, mention spam
+# ANTI-SPAM - Message spam with escalating timeouts
 class AntiSpam:
     def __init__(self):
         self.enabled = {}
         self.messages = defaultdict(list)
         self.whitelisted_roles = defaultdict(list)
-        
-        # Settings per guild
         self.settings = defaultdict(lambda: {
-            'max_messages': 7,  # Max messages in time window
-            'time_window': 10,  # Seconds
-            'max_mentions': 5,  # Max mentions per message
-            'max_emojis': 10,  # Max emojis per message
-            'action': 'timeout'  # timeout, kick, ban
+            'max_messages': 7,
+            'time_window': 10,
+            'max_mentions': 5,
+            'max_emojis': 10,
+            'action': 'timeout'
         })
     
     def add_message(self, guild_id, user_id):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         self.messages[(guild_id, user_id)].append(now)
-        # Keep only last 30 seconds
         self.messages[(guild_id, user_id)] = [t for t in self.messages[(guild_id, user_id)] 
                                               if (now - t).total_seconds() < 30]
     
     def is_spam(self, guild_id, user_id):
         if not self.enabled.get(guild_id): return False
         settings = self.settings[guild_id]
-        now = datetime.utcnow()
-        
+        now = datetime.now(timezone.utc)
         recent = [t for t in self.messages[(guild_id, user_id)] 
                  if (now - t).total_seconds() < settings['time_window']]
-        
         return len(recent) >= settings['max_messages']
     
+    def get_timeout_duration(self, guild_id, user_id):
+        count = len(self.messages.get((guild_id, user_id), []))
+        if count >= 15: return timedelta(minutes=30)
+        elif count >= 12: return timedelta(minutes=15)
+        elif count >= 10: return timedelta(minutes=10)
+        return timedelta(minutes=5)
+    
     def check_message(self, message):
-        """Check if message has spam indicators"""
         guild_id = message.guild.id
         if not self.enabled.get(guild_id): return False, None
-        
         settings = self.settings[guild_id]
         reasons = []
-        
-        # Check mentions
         mention_count = len(message.mentions) + len(message.role_mentions)
         if mention_count > settings['max_mentions']:
             reasons.append(f"{mention_count} mentions")
-        
-        # Check emojis
-        emoji_count = len([c for c in message.content if c in '😀😃😄😁😆😅🤣😂'])
-        emoji_count += message.content.count('<:') + message.content.count('<a:')
-        if emoji_count > settings['max_emojis']:
-            reasons.append(f"{emoji_count} emojis")
-        
         return len(reasons) > 0, reasons
     
     def is_whitelisted(self, member):
@@ -270,600 +265,112 @@ class AntiSpam:
 
 anti_spam = AntiSpam()
 
-# ANTI-RAID EVENTS
-
-@bot.event
-async def on_member_join(member):
-    if not anti_raid.enabled.get(member.guild.id): return
+# ANTI-REACT - Reaction spam detection
+class AntiReact:
+    def __init__(self):
+        self.enabled = {}
+        self.reactions = defaultdict(list)
+        self.whitelisted_roles = defaultdict(list)
+        self.settings = defaultdict(lambda: {
+            'max_reacts': 10,
+            'time_window': 10,
+            'action': 'warn'
+        })
     
-    try:
-        # Track join
-        anti_raid.add_join(member.guild.id, member.id)
+    def add_reaction(self, guild_id, user_id, message_id):
+        now = datetime.now(timezone.utc)
+        self.reactions[(guild_id, user_id)].append((now, message_id))
+        self.reactions[(guild_id, user_id)] = [(t, mid) for t, mid in self.reactions[(guild_id, user_id)] 
+                                                if (now - t).total_seconds() < 30]
+    
+    def is_react_spam(self, guild_id, user_id):
+        if not self.enabled.get(guild_id): return False
+        settings = self.settings[guild_id]
+        now = datetime.now(timezone.utc)
+        recent = [(t, mid) for t, mid in self.reactions[(guild_id, user_id)] 
+                 if (now - t).total_seconds() < settings['time_window']]
+        unique_messages = len(set(mid for _, mid in recent))
+        return len(recent) >= settings['max_reacts'] and unique_messages >= 5
+    
+    def get_recent_messages(self, guild_id, user_id):
+        settings = self.settings[guild_id]
+        now = datetime.now(timezone.utc)
+        recent = [(t, mid) for t, mid in self.reactions[(guild_id, user_id)] 
+                 if (now - t).total_seconds() < settings['time_window']]
+        return list(set(mid for _, mid in recent))
+    
+    def is_whitelisted(self, member):
+        for role in member.roles:
+            if role.id in self.whitelisted_roles.get(member.guild.id, []):
+                return True
+        return False
+
+anti_react = AntiReact()
+
+
+class AutoMod:
+    def __init__(self):
+        self.enabled = {}
+        self.bad_words = defaultdict(lambda: [
+            'nigger', 'nigga', 'faggot', 'fag', 'retard', 'retarded',
+            'cunt', 'kys', 'kms', 'rape', 'molest', 'pedo', 'pedophile',
+            'tranny', 'dyke', 'chink', 'spic', 'wetback', 'gook',
+            'beaner', 'cracker', 'honkey'
+        ])
+        self.staff_bypass = True  # Staff can say anything
+    
+    def check_message(self, message):
+        """Check if message contains bad words"""
+        guild_id = message.guild.id
+        if not self.enabled.get(guild_id):
+            return False, None
         
-        # Check if raid is happening
-        if anti_raid.is_raid(member.guild.id):
-            try:
-                await member.kick(reason='anti-raid: join spam detected')
-                logger.info(f'ANTI-RAID: kicked {member} during raid')
-                await send_log(member.guild, '🚨 ANTI-RAID: JOIN SPAM', 
-                             f'kicked {member.mention} during raid',
-                             COLORS['error'],
-                             {'Total Joins': f"{len(anti_raid.join_tracking[member.guild.id])} in last minute"})
-            except Exception as e:
-                logger.error(f'anti-raid kick failed: {e}')
-            return
+        content_lower = message.content.lower()
         
-        # Check if member is suspicious
-        is_sus, reasons = anti_raid.check_member(member)
-        if is_sus and not anti_raid.is_whitelisted(member):
-            settings = anti_raid.settings[member.guild.id]
-            action = settings['action']
-            
-            try:
-                if action == 'kick':
-                    await member.kick(reason=f"anti-raid: {', '.join(reasons)}")
-                elif action == 'ban':
-                    await member.ban(reason=f"anti-raid: {', '.join(reasons)}")
-                
-                logger.info(f'ANTI-RAID: {action}ed {member} - {reasons}')
-                await send_log(member.guild, f'🚨 ANTI-RAID: SUSPICIOUS MEMBER', 
-                             f'{action}ed {member.mention}',
-                             COLORS['error'],
-                             {'Reasons': ', '.join(reasons), 'Action': action})
-            except Exception as e:
-                logger.error(f'anti-raid action failed: {e}')
-    
-    except Exception as e:
-        logger.error(f'member join event: {e}')
-
-# ANTI-SPAM MESSAGE DETECTION (replaces old on_message spam check)
-
-# Add this to existing on_message event BEFORE bot.process_commands:
-'''
-    # Anti-spam detection
-    if anti_spam.enabled.get(message.guild.id) and not anti_spam.is_whitelisted(message.author):
-        # Track message
-        anti_spam.add_message(message.guild.id, message.author.id)
+        # Check if staff (bypass)
+        if self.staff_bypass:
+            staff_role = message.guild.get_role(HARDCODED_ROLES.get('staff'))
+            if staff_role and staff_role in message.author.roles:
+                return False, None
+            # Check admin perms
+            if message.author.guild_permissions.administrator:
+                return False, None
         
-        # Check for message spam
-        if anti_spam.is_spam(message.guild.id, message.author.id):
-            try:
-                await message.delete()
-                settings = anti_spam.settings[message.guild.id]
-                action = settings['action']
-                
-                if action == 'timeout':
-                    await message.author.timeout(timedelta(minutes=5), reason='anti-spam: message spam')
-                    await message.channel.send(f'{message.author.mention} timed out for 5 min for spamming', delete_after=5)
-                elif action == 'kick':
-                    await message.author.kick(reason='anti-spam: message spam')
-                elif action == 'ban':
-                    await message.author.ban(reason='anti-spam: message spam')
-                
-                logger.info(f'ANTI-SPAM: {action} {message.author} for message spam')
-                await send_log(message.guild, '🚨 ANTI-SPAM: MESSAGE SPAM',
-                             f'{action} {message.author.mention}',
-                             COLORS['error'],
-                             {'Messages': f"{len(anti_spam.messages[(message.guild.id, message.author.id)])} in 10s"})
-            except Exception as e:
-                logger.error(f'anti-spam action failed: {e}')
-            return
+        # Check for bad words
+        for word in self.bad_words[guild_id]:
+            if word in content_lower:
+                return True, word
         
-        # Check message content
-        is_spam, reasons = anti_spam.check_message(message)
-        if is_spam:
-            try:
-                await message.delete()
-                await message.channel.send(f'{message.author.mention} message deleted: {", ".join(reasons)}', delete_after=3)
-            except: pass
-            return
-'''
-
-# ANTI-RAID COMMANDS
-
-@bot.group(name='anti-raid', invoke_without_command=True)
-@is_owner()
-async def anti_raid_group(ctx):
-    embed = discord.Embed(title='🛡️ anti-raid system', color=COLORS['support'])
-    embed.add_field(name='control', value='`$anti-raid enable` turn on\n`$anti-raid disable` turn off\n`$anti-raid status` check status', inline=False)
-    embed.add_field(name='settings', value='`$anti-raid settings` view current settings\n`$anti-raid action <kick/ban>` set punishment\n`$anti-raid accountage <days>` min account age\n`$anti-raid avatar <on/off>` require avatar', inline=False)
-    embed.add_field(name='whitelist', value='`$anti-raid whitelist @role` bypass checks\n`$anti-raid unwhitelist @role` remove bypass', inline=False)
-    embed.add_field(name='detects', value='• join spam (10+ joins in 10s)\n• new accounts (< 7 days)\n• no avatar accounts', inline=False)
-    await ctx.reply(embed=embed)
-
-@anti_raid_group.command(name='enable')
-@is_owner()
-async def anti_raid_enable(ctx):
-    if anti_raid.enabled.get(ctx.guild.id):
-        return await ctx.reply('❌ anti-raid is already enabled')
-    anti_raid.enabled[ctx.guild.id] = True
-    settings = anti_raid.settings[ctx.guild.id]
-    embed = discord.Embed(title='✅ anti-raid enabled', color=COLORS['success'])
-    embed.description = f'**now protecting against:**\n• join spam ({settings["max_joins"]}+ joins in {settings["time_window"]}s)\n• new accounts (< {settings["min_account_age"]} days old)\n• no avatar accounts\n\n**action:** {settings["action"]}'
-    await ctx.reply(embed=embed)
-    await send_log(ctx.guild, '🛡️ anti-raid enabled', f'by {ctx.author.mention}', COLORS['success'])
-
-@anti_raid_group.command(name='disable')
-@is_owner()
-async def anti_raid_disable(ctx):
-    if not anti_raid.enabled.get(ctx.guild.id):
-        return await ctx.reply('❌ anti-raid is already disabled')
-    anti_raid.enabled[ctx.guild.id] = False
-    await ctx.reply(embed=discord.Embed(title='✅ anti-raid disabled', color=COLORS['support']))
-    await send_log(ctx.guild, '🛡️ anti-raid disabled', f'by {ctx.author.mention}', COLORS['error'])
-
-@anti_raid_group.command(name='whitelist')
-@is_owner()
-async def anti_raid_whitelist(ctx, role: discord.Role = None):
-    if not role:
-        return await ctx.reply('❌ specify a role\n\nusage: `$anti-raid whitelist @role`')
-    if role.id in anti_raid.whitelisted_roles.get(ctx.guild.id, []):
-        return await ctx.reply(f'❌ {role.mention} is already whitelisted')
-    anti_raid.whitelisted_roles[ctx.guild.id].append(role.id)
-    await ctx.reply(embed=discord.Embed(title='✅ role whitelisted', description=f'{role.mention} bypasses anti-raid', color=COLORS['success']))
-
-@anti_raid_group.command(name='unwhitelist')
-@is_owner()
-async def anti_raid_unwhitelist(ctx, role: discord.Role = None):
-    if not role:
-        return await ctx.reply('❌ specify a role')
-    if role.id not in anti_raid.whitelisted_roles.get(ctx.guild.id, []):
-        return await ctx.reply(f'❌ {role.mention} is not whitelisted')
-    anti_raid.whitelisted_roles[ctx.guild.id].remove(role.id)
-    await ctx.reply(embed=discord.Embed(title='✅ role removed', color=COLORS['success']))
-
-@anti_raid_group.command(name='action')
-@is_owner()
-async def anti_raid_action(ctx, action: str = None):
-    if not action or action.lower() not in ['kick', 'ban']:
-        return await ctx.reply('❌ usage: `$anti-raid action <kick/ban>`')
-    anti_raid.settings[ctx.guild.id]['action'] = action.lower()
-    await ctx.reply(embed=discord.Embed(title='✅ action updated', description=f'suspicious members will be **{action}ed**', color=COLORS['success']))
-
-@anti_raid_group.command(name='accountage')
-@is_owner()
-async def anti_raid_accountage(ctx, days: int = None):
-    if not days or days < 0 or days > 365:
-        return await ctx.reply('❌ usage: `$anti-raid accountage <1-365>`')
-    anti_raid.settings[ctx.guild.id]['min_account_age'] = days
-    await ctx.reply(embed=discord.Embed(title='✅ account age updated', description=f'accounts must be at least **{days} days old**', color=COLORS['success']))
-
-@anti_raid_group.command(name='avatar')
-@is_owner()
-async def anti_raid_avatar(ctx, toggle: str = None):
-    if not toggle or toggle.lower() not in ['on', 'off']:
-        return await ctx.reply('❌ usage: `$anti-raid avatar <on/off>`')
-    anti_raid.settings[ctx.guild.id]['require_avatar'] = (toggle.lower() == 'on')
-    status = 'required' if toggle.lower() == 'on' else 'not required'
-    await ctx.reply(embed=discord.Embed(title='✅ avatar setting updated', description=f'avatars are now **{status}**', color=COLORS['success']))
-
-@anti_raid_group.command(name='status')
-@is_owner()
-async def anti_raid_status(ctx):
-    enabled = anti_raid.enabled.get(ctx.guild.id, False)
-    settings = anti_raid.settings[ctx.guild.id]
-    wl_roles = anti_raid.whitelisted_roles.get(ctx.guild.id, [])
+        return False, None
     
-    embed = discord.Embed(title='🛡️ anti-raid status', color=COLORS['success'] if enabled else COLORS['error'])
-    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled', inline=True)
-    embed.add_field(name='action', value=settings['action'], inline=True)
-    embed.add_field(name='detection', value=f"• join spam: {settings['max_joins']}+ joins in {settings['time_window']}s\n• min account age: {settings['min_account_age']} days\n• require avatar: {'yes' if settings['require_avatar'] else 'no'}", inline=False)
-    embed.add_field(name='whitelisted roles', value=str(len(wl_roles)), inline=True)
+    def add_word(self, guild_id, word):
+        """Add custom bad word"""
+        word = word.lower()
+        if word not in self.bad_words[guild_id]:
+            self.bad_words[guild_id].append(word)
+            return True
+        return False
     
-    if wl_roles:
-        roles_list = []
-        for role_id in wl_roles[:5]:
-            role = ctx.guild.get_role(role_id)
-            if role: roles_list.append(role.mention)
-        if roles_list:
-            embed.add_field(name='bypass roles', value='\n'.join(roles_list), inline=False)
+    def remove_word(self, guild_id, word):
+        """Remove bad word"""
+        word = word.lower()
+        if word in self.bad_words[guild_id]:
+            self.bad_words[guild_id].remove(word)
+            return True
+        return False
+
+
+automod = AutoMod()
+
+# LOCKDOWN SYSTEM
+class Lockdown:
+    def __init__(self):
+        self.locked_channels = defaultdict(list)
     
-    await ctx.reply(embed=embed)
+    def is_locked(self, guild_id):
+        return len(self.locked_channels.get(guild_id, [])) > 0
 
-# ANTI-SPAM COMMANDS
-
-@bot.group(name='anti-spam', invoke_without_command=True)
-@is_owner()
-async def anti_spam_group(ctx):
-    embed = discord.Embed(title='🛡️ anti-spam system', color=COLORS['support'])
-    embed.add_field(name='control', value='`$anti-spam enable` turn on\n`$anti-spam disable` turn off\n`$anti-spam status` check status', inline=False)
-    embed.add_field(name='settings', value='`$anti-spam action <timeout/kick/ban>` set punishment\n`$anti-spam messages <amount>` max messages in 10s\n`$anti-spam mentions <amount>` max mentions per message', inline=False)
-    embed.add_field(name='whitelist', value='`$anti-spam whitelist @role` bypass checks\n`$anti-spam unwhitelist @role` remove bypass', inline=False)
-    embed.add_field(name='detects', value='• message spam (7+ msgs in 10s)\n• mention spam (5+ mentions)\n• emoji spam (10+ emojis)', inline=False)
-    await ctx.reply(embed=embed)
-
-@anti_spam_group.command(name='enable')
-@is_owner()
-async def anti_spam_enable(ctx):
-    if anti_spam.enabled.get(ctx.guild.id):
-        return await ctx.reply('❌ anti-spam is already enabled')
-    anti_spam.enabled[ctx.guild.id] = True
-    settings = anti_spam.settings[ctx.guild.id]
-    embed = discord.Embed(title='✅ anti-spam enabled', color=COLORS['success'])
-    embed.description = f'**now detecting:**\n• message spam ({settings["max_messages"]}+ msgs in {settings["time_window"]}s)\n• mention spam ({settings["max_mentions"]}+ mentions)\n• emoji spam ({settings["max_emojis"]}+ emojis)\n\n**action:** {settings["action"]}'
-    await ctx.reply(embed=embed)
-    await send_log(ctx.guild, '🛡️ anti-spam enabled', f'by {ctx.author.mention}', COLORS['success'])
-
-@anti_spam_group.command(name='disable')
-@is_owner()
-async def anti_spam_disable(ctx):
-    if not anti_spam.enabled.get(ctx.guild.id):
-        return await ctx.reply('❌ anti-spam is already disabled')
-    anti_spam.enabled[ctx.guild.id] = False
-    await ctx.reply(embed=discord.Embed(title='✅ anti-spam disabled', color=COLORS['support']))
-    await send_log(ctx.guild, '🛡️ anti-spam disabled', f'by {ctx.author.mention}', COLORS['error'])
-
-@anti_spam_group.command(name='whitelist')
-@is_owner()
-async def anti_spam_whitelist(ctx, role: discord.Role = None):
-    if not role:
-        return await ctx.reply('❌ specify a role')
-    if role.id in anti_spam.whitelisted_roles.get(ctx.guild.id, []):
-        return await ctx.reply(f'❌ {role.mention} is already whitelisted')
-    anti_spam.whitelisted_roles[ctx.guild.id].append(role.id)
-    await ctx.reply(embed=discord.Embed(title='✅ role whitelisted', description=f'{role.mention} bypasses anti-spam', color=COLORS['success']))
-
-@anti_spam_group.command(name='unwhitelist')
-@is_owner()
-async def anti_spam_unwhitelist(ctx, role: discord.Role = None):
-    if not role:
-        return await ctx.reply('❌ specify a role')
-    if role.id not in anti_spam.whitelisted_roles.get(ctx.guild.id, []):
-        return await ctx.reply(f'❌ {role.mention} is not whitelisted')
-    anti_spam.whitelisted_roles[ctx.guild.id].remove(role.id)
-    await ctx.reply(embed=discord.Embed(title='✅ role removed', color=COLORS['success']))
-
-@anti_spam_group.command(name='action')
-@is_owner()
-async def anti_spam_action(ctx, action: str = None):
-    if not action or action.lower() not in ['timeout', 'kick', 'ban']:
-        return await ctx.reply('❌ usage: `$anti-spam action <timeout/kick/ban>`')
-    anti_spam.settings[ctx.guild.id]['action'] = action.lower()
-    await ctx.reply(embed=discord.Embed(title='✅ action updated', description=f'spammers will be **{action}ed**', color=COLORS['success']))
-
-@anti_spam_group.command(name='status')
-@is_owner()
-async def anti_spam_status(ctx):
-    enabled = anti_spam.enabled.get(ctx.guild.id, False)
-    settings = anti_spam.settings[ctx.guild.id]
-    wl_roles = anti_spam.whitelisted_roles.get(ctx.guild.id, [])
-    
-    embed = discord.Embed(title='🛡️ anti-spam status', color=COLORS['success'] if enabled else COLORS['error'])
-    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled', inline=True)
-    embed.add_field(name='action', value=settings['action'], inline=True)
-    embed.add_field(name='detection', value=f"• message spam: {settings['max_messages']} msgs in {settings['time_window']}s\n• mention spam: {settings['max_mentions']} per message\n• emoji spam: {settings['max_emojis']} per message", inline=False)
-    embed.add_field(name='whitelisted roles', value=str(len(wl_roles)), inline=True)
-    
-    await ctx.reply(embed=embed)
-
-# ANTI-NUKE EVENTS
-
-@bot.event
-async def on_guild_channel_delete(channel):
-    if not anti_nuke.enabled.get(channel.guild.id): return
-    try:
-        async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
-            # CRITICAL CHECKS
-            if not anti_nuke.is_recent(entry.created_at): return
-            if not anti_nuke.is_after_restart(entry.created_at): return
-            if entry.target.id != channel.id: continue
-            
-            deleter = entry.user
-            if deleter.id == OWNER_ID: return
-            if deleter.id == bot.user.id: return
-            
-            deleter_member = channel.guild.get_member(deleter.id)
-            if anti_nuke.is_whitelisted(channel.guild.id, deleter_member): return
-            
-            anti_nuke.add_action(channel.guild.id, deleter.id, 'channel_deletes')
-            
-            if anti_nuke.check_nuke(channel.guild.id, deleter.id):
-                try:
-                    if deleter_member:
-                        for role in deleter_member.roles:
-                            if role.id != channel.guild.id:
-                                try: await deleter_member.remove_roles(role)
-                                except: pass
-                        await deleter_member.ban(reason='anti-nuke: mass channel deletion')
-                    logger.info(f'ANTI-NUKE: banned {deleter} for mass channel deletion')
-                    await send_log(channel.guild, '🚨 ANTI-NUKE TRIGGERED', 
-                                   fields={'User': f'{deleter} ({deleter.id})', 'Action': 'Mass Channel Deletion', 'Punishment': 'Stripped roles + Banned'},
-                                   color=COLORS['error'])
-                except Exception as e:
-                    logger.error(f'anti-nuke ban failed: {e}')
-            break
-    except Exception as e:
-        logger.error(f'channel delete event: {e}')
-
-@bot.event
-async def on_member_ban(guild, user):
-    if not anti_nuke.enabled.get(guild.id): return
-    try:
-        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
-            if not anti_nuke.is_recent(entry.created_at): return
-            if not anti_nuke.is_after_restart(entry.created_at): return
-            if entry.target.id != user.id: continue
-            
-            banner = entry.user
-            if banner.id == OWNER_ID: return
-            if banner.id == bot.user.id: return
-            
-            banner_member = guild.get_member(banner.id)
-            if anti_nuke.is_whitelisted(guild.id, banner_member): return
-            
-            anti_nuke.add_action(guild.id, banner.id, 'bans')
-            
-            if anti_nuke.check_nuke(guild.id, banner.id):
-                try:
-                    if banner_member:
-                        for role in banner_member.roles:
-                            if role.id != guild.id:
-                                try: await banner_member.remove_roles(role)
-                                except: pass
-                        await banner_member.ban(reason='anti-nuke: mass banning')
-                    logger.info(f'ANTI-NUKE: banned {banner} for mass banning')
-                    await send_log(guild, '🚨 ANTI-NUKE TRIGGERED',
-                                   fields={'User': f'{banner} ({banner.id})', 'Action': 'Mass Banning Users', 'Punishment': 'Stripped roles + Banned'},
-                                   color=COLORS['error'])
-                except Exception as e:
-                    logger.error(f'anti-nuke ban failed: {e}')
-            break
-    except Exception as e:
-        logger.error(f'member ban event: {e}')
-
-@bot.event
-async def on_member_remove(member):
-    if not anti_nuke.enabled.get(member.guild.id): return
-    try:
-        await asyncio.sleep(0.5)
-        async for entry in member.guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
-            if not anti_nuke.is_recent(entry.created_at): return
-            if not anti_nuke.is_after_restart(entry.created_at): return
-            if entry.target.id != member.id: continue
-            
-            kicker = entry.user
-            if kicker.id == OWNER_ID: return
-            if kicker.id == bot.user.id: return
-            
-            kicker_member = member.guild.get_member(kicker.id)
-            if anti_nuke.is_whitelisted(member.guild.id, kicker_member): return
-            
-            anti_nuke.add_action(member.guild.id, kicker.id, 'kicks')
-            
-            if anti_nuke.check_nuke(member.guild.id, kicker.id):
-                try:
-                    if kicker_member:
-                        for role in kicker_member.roles:
-                            if role.id != member.guild.id:
-                                try: await kicker_member.remove_roles(role)
-                                except: pass
-                        await kicker_member.ban(reason='anti-nuke: mass kicking')
-                    logger.info(f'ANTI-NUKE: banned {kicker} for mass kicking')
-                    await send_log(member.guild, '🚨 ANTI-NUKE TRIGGERED',
-                                   fields={'User': f'{kicker} ({kicker.id})', 'Action': 'Mass Kicking Users', 'Punishment': 'Stripped roles + Banned'},
-                                   color=COLORS['error'])
-                except Exception as e:
-                    logger.error(f'anti-nuke ban failed: {e}')
-            break
-    except Exception as e:
-        logger.error(f'member remove event: {e}')
-
-@bot.event
-async def on_guild_role_delete(role):
-    if not anti_nuke.enabled.get(role.guild.id): return
-    try:
-        async for entry in role.guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
-            if not anti_nuke.is_recent(entry.created_at): return
-            if not anti_nuke.is_after_restart(entry.created_at): return
-            if entry.target.id != role.id: continue
-            
-            deleter = entry.user
-            if deleter.id == OWNER_ID: return
-            if deleter.id == bot.user.id: return
-            
-            deleter_member = role.guild.get_member(deleter.id)
-            if anti_nuke.is_whitelisted(role.guild.id, deleter_member): return
-            
-            anti_nuke.add_action(role.guild.id, deleter.id, 'role_deletes')
-            
-            if anti_nuke.check_nuke(role.guild.id, deleter.id):
-                try:
-                    if deleter_member:
-                        for r in deleter_member.roles:
-                            if r.id != role.guild.id:
-                                try: await deleter_member.remove_roles(r)
-                                except: pass
-                        await deleter_member.ban(reason='anti-nuke: mass role deletion')
-                    logger.info(f'ANTI-NUKE: banned {deleter} for mass role deletion')
-                    await send_log(role.guild, '🚨 ANTI-NUKE TRIGGERED',
-                                   fields={'User': f'{deleter} ({deleter.id})', 'Action': 'Mass Role Deletion', 'Punishment': 'Stripped roles + Banned'},
-                                   color=COLORS['error'])
-                except Exception as e:
-                    logger.error(f'anti-nuke ban failed: {e}')
-            break
-    except Exception as e:
-        logger.error(f'role delete event: {e}')
-
-@bot.event
-async def on_guild_channel_create(channel):
-    if not anti_nuke.enabled.get(channel.guild.id): return
-    try:
-        async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_create):
-            if not anti_nuke.is_recent(entry.created_at): return
-            if not anti_nuke.is_after_restart(entry.created_at): return
-            if entry.target.id != channel.id: continue
-            
-            creator = entry.user
-            if creator.id == OWNER_ID: return
-            if creator.id == bot.user.id: return
-            
-            creator_member = channel.guild.get_member(creator.id)
-            if anti_nuke.is_whitelisted(channel.guild.id, creator_member): return
-            
-            anti_nuke.add_action(channel.guild.id, creator.id, 'channel_creates')
-            
-            if anti_nuke.check_nuke(channel.guild.id, creator.id):
-                try:
-                    if creator_member:
-                        for role in creator_member.roles:
-                            if role.id != channel.guild.id:
-                                try: await creator_member.remove_roles(role)
-                                except: pass
-                        await creator_member.ban(reason='anti-nuke: channel spam')
-                    logger.info(f'ANTI-NUKE: banned {creator} for channel spam')
-                    await send_log(channel.guild, '🚨 ANTI-NUKE TRIGGERED',
-                                   fields={'User': f'{creator} ({creator.id})', 'Action': 'Mass Channel Creation', 'Punishment': 'Stripped roles + Banned'},
-                                   color=COLORS['error'])
-                except Exception as e:
-                    logger.error(f'anti-nuke ban failed: {e}')
-            break
-    except Exception as e:
-        logger.error(f'channel create event: {e}')
-
-@bot.event
-async def on_member_update(before, after):
-    if not anti_nuke.enabled.get(after.guild.id): return
-    if len(after.roles) > len(before.roles):
-        new_role = set(after.roles) - set(before.roles)
-        for role in new_role:
-            if role.managed:
-                try:
-                    async for entry in after.guild.audit_logs(limit=5, action=discord.AuditLogAction.bot_add):
-                        if not anti_nuke.is_recent(entry.created_at): continue
-                        if not anti_nuke.is_after_restart(entry.created_at): continue
-                        if entry.target.id != after.id: continue
-                        
-                        inviter = entry.user
-                        if inviter.id == OWNER_ID: return
-                        
-                        inviter_member = after.guild.get_member(inviter.id)
-                        if anti_nuke.is_whitelisted(after.guild.id, inviter_member): return
-                        
-                        try:
-                            await after.kick(reason='anti-nuke: unauthorized bot')
-                            if inviter_member:
-                                await inviter_member.ban(reason='anti-nuke: added unauthorized bot')
-                            logger.info(f'ANTI-NUKE: kicked bot {after} and banned {inviter}')
-                            await send_log(after.guild, '🚨 ANTI-NUKE TRIGGERED',
-                                           fields={'User': f'{inviter} ({inviter.id})', 'Bot Added': f'{after} ({after.id})', 'Action': 'Unauthorized Bot Add', 'Punishment': 'Bot kicked + User banned'},
-                                           color=COLORS['error'])
-                        except Exception as e:
-                            logger.error(f'anti-nuke bot kick failed: {e}')
-                        break
-                except Exception as e:
-                    logger.error(f'bot add event: {e}')
-
-@bot.event
-async def on_webhooks_update(channel):
-    if not anti_nuke.enabled.get(channel.guild.id): return
-    try:
-        async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.webhook_create):
-            if not anti_nuke.is_recent(entry.created_at): return
-            if not anti_nuke.is_after_restart(entry.created_at): return
-            
-            creator = entry.user
-            if creator.id == OWNER_ID: return
-            
-            creator_member = channel.guild.get_member(creator.id)
-            if anti_nuke.is_whitelisted(channel.guild.id, creator_member): return
-            
-            try:
-                webhooks = await channel.webhooks()
-                for webhook in webhooks:
-                    try:
-                        await webhook.delete(reason='anti-nuke: unauthorized webhook')
-                    except: pass
-                
-                if creator_member:
-                    await creator_member.ban(reason='anti-nuke: created webhook')
-                logger.info(f'ANTI-NUKE: deleted webhook and banned {creator}')
-                await send_log(channel.guild, '🚨 ANTI-NUKE TRIGGERED',
-                               fields={'User': f'{creator} ({creator.id})', 'Channel': channel.mention, 'Action': 'Unauthorized Webhook', 'Punishment': 'Webhook deleted + User banned'},
-                               color=COLORS['error'])
-            except Exception as e:
-                logger.error(f'anti-nuke webhook delete failed: {e}')
-            break
-    except Exception as e:
-        logger.error(f'webhooks update event: {e}')
-
-# ANTI-NUKE COMMANDS
-
-@bot.group(name='anti-nuke', invoke_without_command=True)
-@is_owner()
-async def anti_nuke_group(ctx):
-    embed = discord.Embed(title='🛡️ anti-nuke system', color=COLORS['support'])
-    embed.add_field(name='control', value='`$anti-nuke enable` turn on\n`$anti-nuke disable` turn off\n`$anti-nuke status` check status', inline=False)
-    embed.add_field(name='whitelist', value='`$anti-nuke whitelist @role` allow role to bypass\n`$anti-nuke unwhitelist @role` remove permission', inline=False)
-    embed.add_field(name='protects against', value='• mass bans (3+ in 10s)\n• mass kicks (3+ in 10s)\n• channel spam (5+ in 10s)\n• mass channel deletes (3+ in 10s)\n• mass role deletes (3+ in 10s)\n• unauthorized bots\n• unauthorized webhooks', inline=False)
-    await ctx.reply(embed=embed)
-
-@anti_nuke_group.command(name='enable')
-@is_owner()
-async def anti_nuke_enable(ctx):
-    if anti_nuke.enabled.get(ctx.guild.id):
-        return await ctx.reply('❌ anti-nuke is already enabled')
-    anti_nuke.enabled[ctx.guild.id] = True
-    embed = discord.Embed(title='✅ anti-nuke enabled', color=COLORS['success'])
-    embed.description = '**now protecting against:**\n• mass bans/kicks\n• mass channel/role deletes\n• channel spam\n• unauthorized bots/webhooks\n\n**punishment:** strip roles + ban\n**whitelist roles:** `$anti-nuke whitelist @role`'
-    await ctx.reply(embed=embed)
-    await send_log(ctx.guild, '🛡️ anti-nuke enabled', f'by {ctx.author.mention}', COLORS['success'])
-
-@anti_nuke_group.command(name='disable')
-@is_owner()
-async def anti_nuke_disable(ctx):
-    if not anti_nuke.enabled.get(ctx.guild.id):
-        return await ctx.reply('❌ anti-nuke is already disabled')
-    anti_nuke.enabled[ctx.guild.id] = False
-    await ctx.reply(embed=discord.Embed(title='✅ anti-nuke disabled', description='server protection is now off', color=COLORS['support']))
-    await send_log(ctx.guild, '🛡️ anti-nuke disabled', f'by {ctx.author.mention}', COLORS['error'])
-
-@anti_nuke_group.command(name='whitelist')
-@is_owner()
-async def anti_nuke_whitelist(ctx, role: discord.Role = None):
-    if not role:
-        return await ctx.reply('❌ specify a role\n\nusage: `$anti-nuke whitelist @role`')
-    if role.id in anti_nuke.whitelisted_roles.get(ctx.guild.id, []):
-        return await ctx.reply(f'❌ {role.mention} is already whitelisted')
-    
-    anti_nuke.whitelisted_roles[ctx.guild.id].append(role.id)
-    await ctx.reply(embed=discord.Embed(title='✅ role whitelisted', description=f'{role.mention} can now bypass anti-nuke', color=COLORS['success']))
-    await send_log(ctx.guild, '🛡️ anti-nuke whitelist added', f'{role.mention} by {ctx.author.mention}', COLORS['success'])
-
-@anti_nuke_group.command(name='unwhitelist')
-@is_owner()
-async def anti_nuke_unwhitelist(ctx, role: discord.Role = None):
-    if not role:
-        return await ctx.reply('❌ specify a role\n\nusage: `$anti-nuke unwhitelist @role`')
-    if role.id not in anti_nuke.whitelisted_roles.get(ctx.guild.id, []):
-        return await ctx.reply(f'❌ {role.mention} is not whitelisted')
-    
-    anti_nuke.whitelisted_roles[ctx.guild.id].remove(role.id)
-    await ctx.reply(embed=discord.Embed(title='✅ role removed', description=f'{role.mention} removed from whitelist', color=COLORS['success']))
-    await send_log(ctx.guild, '🛡️ anti-nuke whitelist removed', f'{role.mention} by {ctx.author.mention}', COLORS['support'])
-
-@anti_nuke_group.command(name='status')
-@is_owner()
-async def anti_nuke_status(ctx):
-    enabled = anti_nuke.enabled.get(ctx.guild.id, False)
-    wl_roles = anti_nuke.whitelisted_roles.get(ctx.guild.id, [])
-    
-    embed = discord.Embed(title='🛡️ anti-nuke status', color=COLORS['success'] if enabled else COLORS['error'])
-    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled', inline=True)
-    embed.add_field(name='whitelisted roles', value=str(len(wl_roles)), inline=True)
-    
-    if wl_roles:
-        roles_list = []
-        for role_id in wl_roles[:5]:
-            role = ctx.guild.get_role(role_id)
-            if role:
-                roles_list.append(role.mention)
-        if roles_list:
-            embed.add_field(name='roles that bypass', value='\n'.join(roles_list), inline=False)
-    
-    embed.add_field(name='protection', value='• mass bans (3+/10s)\n• mass kicks (3+/10s)\n• channel spam (5+/10s)\n• channel deletes (3+/10s)\n• role deletes (3+/10s)\n• unauthorized bots\n• unauthorized webhooks', inline=False)
-    
-    await ctx.reply(embed=embed)
-
+lockdown = Lockdown()
 
 class Lockdown:
     def __init__(self):
@@ -969,27 +476,6 @@ def parse_duration(duration_str):
         return None
     amount, unit = int(match.group(1)), match.group(2)
     return timedelta(seconds=amount * units[unit])
-
-
-async def send_log(guild, title, description=None, color=0x5865F2, fields=None, user=None):
-    try:
-        async with db.pool.acquire() as conn:
-            config = await conn.fetchrow('SELECT log_channel_id FROM config WHERE guild_id = $1', guild.id)
-            if config and config['log_channel_id']:
-                log_channel = guild.get_channel(config['log_channel_id'])
-                if log_channel:
-                    embed = discord.Embed(title=title, color=color, timestamp=datetime.utcnow())
-                    if description:
-                        embed.description = description
-                    if user:
-                        embed.set_author(name=str(user), icon_url=user.display_avatar.url)
-                    if fields:
-                        for name, value in fields.items():
-                            embed.add_field(name=name, value=str(value), inline=True)
-                    await log_channel.send(embed=embed)
-    except Exception as e:
-        logger.error(f'log error: {e}')
-
 
 class MiddlemanModal(Modal, title='Middleman Request'):
     def __init__(self, tier):
@@ -1345,8 +831,6 @@ async def add_cmd(ctx, member: discord.Member = None):
         await ctx.channel.set_permissions(member, read_messages=True, send_messages=True)
         embed = discord.Embed(title='✅ User Added', description=f'{member.mention} has been added to the ticket', color=COLORS['success'])
         await ctx.reply(embed=embed)
-
-        await send_log(ctx.guild, "➕ User Added to Ticket", fields={"Channel": ctx.channel.mention, "Added": member.mention, "By": ctx.author.mention}, color=COLORS['support'], user=ctx.author)
     except Exception as e:
         await ctx.reply(f'❌ Error: {str(e)}')
 
@@ -1381,8 +865,6 @@ async def remove_cmd(ctx, member: discord.Member = None):
         await ctx.channel.set_permissions(member, overwrite=None)
         embed = discord.Embed(title='❌ User Removed', description=f'{member.mention} has been removed from the ticket', color=COLORS['error'])
         await ctx.reply(embed=embed)
-
-        await send_log(ctx.guild, "➖ User Removed from Ticket", fields={"Channel": ctx.channel.mention, "Removed": member.mention, "By": ctx.author.mention}, color=COLORS['support'], user=ctx.author)
     except Exception as e:
         await ctx.reply(f'❌ Error: {str(e)}')
 
@@ -2086,98 +1568,7 @@ async def whitelisted_cmd(ctx, protection: str = None):
 
 # ==================== ANTI PROTECTION COMMANDS ====================
 
-@bot.group(name='anti-link', invoke_without_command=True)
-@is_owner()
-async def anti_link_group(ctx):
-    embed = discord.Embed(title='🔗 anti-link commands', color=COLORS['support'])
-    embed.add_field(name='control', value='`$anti-link enable` turn on\n`$anti-link disable` turn off\n`$anti-link status` check status', inline=False)
-    embed.add_field(name='whitelist roles', value='`$anti-link role @role` allow role to post links\n`$anti-link unrole @role` remove permission', inline=False)
-    embed.add_field(name='whitelist URLs', value='`$anti-link whitelist add <url>` allow specific URL\n`$anti-link whitelist remove <url>` remove URL\n`$anti-link whitelist list` view all', inline=False)
-    await ctx.reply(embed=embed)
-
-@anti_link_group.command(name='enable')
-@is_owner()
-async def anti_link_enable(ctx):
-    if anti_link.enabled.get(ctx.guild.id):
-        return await ctx.reply('❌ anti-link is already enabled')
-    anti_link.enabled[ctx.guild.id] = True
-    await ctx.reply(embed=discord.Embed(title='✅ anti-link enabled', description='links will be deleted\nwhitelist roles with `$anti-link role @role`', color=COLORS['success']))
-
-@anti_link_group.command(name='disable')
-@is_owner()
-async def anti_link_disable(ctx):
-    if not anti_link.enabled.get(ctx.guild.id):
-        return await ctx.reply('❌ anti-link is already disabled')
-    anti_link.enabled[ctx.guild.id] = False
-    await ctx.reply(embed=discord.Embed(title='✅ anti-link disabled', description='links are allowed', color=COLORS['support']))
-
-@anti_link_group.command(name='role')
-@is_owner()
-async def anti_link_role_whitelist(ctx, role: discord.Role = None):
-    if not role:
-        return await ctx.reply('❌ specify a role\n\nusage: `$anti-link role @role`')
-    
-    if role.id in anti_link.whitelisted_roles.get(ctx.guild.id, []):
-        return await ctx.reply(f'❌ {role.mention} is already whitelisted')
-    
-    anti_link.whitelisted_roles[ctx.guild.id].append(role.id)
-    await ctx.reply(embed=discord.Embed(title='✅ role whitelisted', description=f'{role.mention} can now post links', color=COLORS['success']))
-
-@anti_link_group.command(name='unrole')
-@is_owner()
-async def anti_link_role_unwhitelist(ctx, role: discord.Role = None):
-    if not role:
-        return await ctx.reply('❌ specify a role\n\nusage: `$anti-link unrole @role`')
-    
-    if role.id not in anti_link.whitelisted_roles.get(ctx.guild.id, []):
-        return await ctx.reply(f'❌ {role.mention} is not whitelisted')
-    
-    anti_link.whitelisted_roles[ctx.guild.id].remove(role.id)
-    await ctx.reply(embed=discord.Embed(title='✅ role removed', description=f'{role.mention} removed from whitelist', color=COLORS['success']))
-
-@anti_link_group.command(name='whitelist')
-@is_owner()
-async def anti_link_whitelist(ctx, action: str = None, *, url: str = None):
-    if action == 'add' and url:
-        if url in anti_link.whitelist.get(ctx.guild.id, []):
-            return await ctx.reply(f'❌ `{url}` is already whitelisted')
-        anti_link.whitelist[ctx.guild.id].append(url)
-        await ctx.reply(embed=discord.Embed(title='✅ URL whitelisted', description=f'`{url}` is now allowed', color=COLORS['success']))
-    elif action == 'remove' and url:
-        if url in anti_link.whitelist[ctx.guild.id]:
-            anti_link.whitelist[ctx.guild.id].remove(url)
-            await ctx.reply(embed=discord.Embed(title='✅ URL removed', description=f'`{url}` removed', color=COLORS['success']))
-        else:
-            await ctx.reply('❌ URL not in whitelist')
-    elif action == 'list':
-        wl = anti_link.whitelist.get(ctx.guild.id, [])
-        if not wl: return await ctx.reply('no whitelisted URLs')
-        embed = discord.Embed(title='✅ whitelisted URLs', description='\n'.join([f'• `{u}`' for u in wl]), color=COLORS['support'])
-        await ctx.reply(embed=embed)
-    else:
-        await ctx.reply('usage: `$anti-link whitelist add/remove/list <url>`')
-
-@anti_link_group.command(name='status')
-@is_owner()
-async def anti_link_status(ctx):
-    enabled = anti_link.enabled.get(ctx.guild.id, False)
-    wl_urls = len(anti_link.whitelist.get(ctx.guild.id, []))
-    wl_roles = len(anti_link.whitelisted_roles.get(ctx.guild.id, []))
-    embed = discord.Embed(title='🔗 anti-link status', color=COLORS['support'])
-    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled', inline=True)
-    embed.add_field(name='whitelisted', value=f'{wl_roles} roles\n{wl_urls} URLs', inline=True)
-    
-    if wl_roles > 0:
-        roles_list = []
-        for role_id in anti_link.whitelisted_roles.get(ctx.guild.id, []):
-            role = ctx.guild.get_role(role_id)
-            if role:
-                roles_list.append(role.mention)
-        if roles_list:
-            embed.add_field(name='roles with link perms', value='\n'.join(roles_list[:5]), inline=False)
-    
-    await ctx.reply(embed=embed)
-
+@bot.command(name='lockdown')
 @is_owner()
 async def lockdown_cmd(ctx):
     if lockdown.is_locked(ctx.guild.id): return await ctx.reply('❌ Already locked')
@@ -2351,10 +1742,30 @@ async def modperms_show(ctx):
 # ==================== UTILITY COMMANDS ====================
 
 @bot.command(name='afk')
-async def afk_cmd(ctx, *, reason: str = "AFK"):
-    afk_users[ctx.author.id] = {'reason': reason, 'guild': ctx.guild.id}
-    embed = discord.Embed(title='💤 AFK Set', description=f'You are now AFK\n**Reason:** {reason}', color=COLORS['support'])
-    await ctx.reply(embed=embed)
+async def afk_cmd(ctx, *, reason: str = 'AFK'):
+    afk_users[ctx.author.id] = {'reason': reason, 'time': datetime.now(timezone.utc), 'original_nick': ctx.author.display_name}
+    try:
+        new_nick = f"[AFK] {ctx.author.display_name}"
+        if len(new_nick) > 32:
+            new_nick = f"[AFK] {ctx.author.name}"[:32]
+        await ctx.author.edit(nick=new_nick, reason='AFK')
+        await ctx.reply(f'✅ AFK set: {reason}', delete_after=5)
+    except:
+        await ctx.reply(f'✅ AFK set: {reason}', delete_after=5)
+
+@bot.command(name='afkoff')
+async def afkoff_cmd(ctx):
+    if ctx.author.id in afk_users:
+        original = afk_users[ctx.author.id].get('original_nick')
+        del afk_users[ctx.author.id]
+        try:
+            if ctx.author.display_name.startswith('[AFK]'):
+                await ctx.author.edit(nick=original if original else None, reason='AFK removed')
+            await ctx.reply('✅ Welcome back!', delete_after=5)
+        except:
+            await ctx.reply('✅ Welcome back!', delete_after=5)
+    else:
+        await ctx.reply('❌ not afk', delete_after=5)
 
 @bot.command(name='afkoff')
 async def afkoff_cmd(ctx):
@@ -2405,7 +1816,7 @@ async def banner_cmd(ctx, member: discord.Member = None):
 @bot.command(name='userinfo', aliases=['ui'])
 async def userinfo_cmd(ctx, member: discord.Member = None):
     member = member or ctx.author
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     created = member.created_at.strftime('%b %d, %Y')
     joined = member.joined_at.strftime('%b %d, %Y') if member.joined_at else 'Unknown'
     acc_age = (now - member.created_at.replace(tzinfo=None)).days
@@ -2469,7 +1880,7 @@ async def membercount_cmd(ctx):
 
 @bot.command(name='botinfo', aliases=['bi'])
 async def botinfo_cmd(ctx):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     uptime = now - bot_start_time
     hours, remainder = divmod(int(uptime.total_seconds()), 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -2632,7 +2043,7 @@ async def help_cmd(ctx):
 @bot.event
 async def on_ready():
     global bot_start_time
-    bot_start_time = datetime.utcnow()
+    bot_start_time = datetime.now(timezone.utc)
     logger.info(f'Logged in as {bot.user}')
     try:
         await db.connect()
@@ -2666,7 +2077,41 @@ async def on_message_edit(before, after):
         }
 
 @bot.event
+async def on_member_update(before, after):
+    if not anti_nuke.enabled.get(after.guild.id): return
+    if len(after.roles) > len(before.roles):
+        new_role = set(after.roles) - set(before.roles)
+        for role in new_role:
+            if role.managed:
+                async for entry in after.guild.audit_logs(limit=5, action=discord.AuditLogAction.bot_add):
+                    if entry.target and entry.target.bot:
+                        bot_member = entry.target
+                        inviter = entry.user
+                        if inviter.id == OWNER_ID: return
+                        if not anti_nuke.can_add_bot(after.guild.id, inviter.id):
+                            try:
+                                await bot_member.kick(reason='Unauthorized bot add (Anti-Nuke)')
+                                await inviter.ban(reason='Added bot without permission (Anti-Nuke)')
+                            except: pass
+                        break
+
 @bot.event
+async def on_integration_create(integration):
+    if not anti_nuke.enabled.get(integration.guild.id): return
+    try:
+        async for entry in integration.guild.audit_logs(limit=1, action=discord.AuditLogAction.integration_create):
+            creator = entry.user
+            if creator.id == OWNER_ID: return
+            if not anti_nuke.can_add_integration(integration.guild.id, creator.id):
+                try:
+                    await integration.delete()
+                    await creator.ban(reason='Unauthorized integration (Anti-Nuke)')
+                except Exception as e:
+                    logger.error(f'Integration error: {e}')
+            break
+    except Exception as e:
+        logger.error(f'Integration create event error: {e}')
+
 @bot.event
 async def on_guild_channel_delete(channel):
     async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
@@ -2681,6 +2126,22 @@ async def on_guild_channel_delete(channel):
 @bot.event
 async def on_message(message):
     if message.author.bot: return
+
+    # AutoMod bad word filter
+    if message.guild:
+        has_badword, word = automod.check_message(message)
+        if has_badword:
+            try:
+                await message.delete()
+                await message.channel.send(f'{message.author.mention} watch your language', delete_after=5)
+                logger.info(f'AUTOMOD: deleted message - bad word')
+                try:
+                    await send_log(message.guild, '🚨 AUTOMOD', f'deleted message from {message.author.mention}',
+                                 COLORS['error'], {'Channel': message.channel.mention})
+                except: pass
+            except: pass
+            return
+    
     if not message.guild: return
 
     # AFK check
@@ -2746,44 +2207,807 @@ async def on_message(message):
         except Exception as e:
             logger.error(f'Ticket filter error: {e}')
 
-    # Anti-spam detection
-    if anti_spam.enabled.get(message.guild.id) and not anti_spam.is_whitelisted(message.author):
-        # Track message
+    # Anti-spam
+    if not anti_spam.is_whitelisted(message.guild.id, message.author):
         anti_spam.add_message(message.guild.id, message.author.id)
-        
-        # Check for message spam
         if anti_spam.is_spam(message.guild.id, message.author.id):
             try:
                 await message.delete()
-                settings = anti_spam.settings[message.guild.id]
-                action = settings['action']
-                
-                if action == 'timeout':
-                    await message.author.timeout(timedelta(minutes=5), reason='anti-spam: message spam')
-                    await message.channel.send(f'{message.author.mention} timed out for 5 min for spamming', delete_after=5)
-                elif action == 'kick':
-                    await message.author.kick(reason='anti-spam: message spam')
-                    await message.channel.send(f'{message.author.mention} kicked for spamming', delete_after=5)
-                elif action == 'ban':
-                    await message.author.ban(reason='anti-spam: message spam')
-                
-                logger.info(f'ANTI-SPAM: {action} {message.author} for message spam')
-                await send_log(message.guild, '🚨 ANTI-SPAM: MESSAGE SPAM',
-                             f'{action} {message.author.mention}',
-                             COLORS['error'],
-                             {'Messages': f"{len(anti_spam.messages[(message.guild.id, message.author.id)])} in 10s"})
-            except Exception as e:
-                logger.error(f'anti-spam action failed: {e}')
-            return
-        
-        # Check message content (mentions/emojis)
-        is_spam, reasons = anti_spam.check_message(message)
-        if is_spam:
-            try:
-                await message.delete()
-                await message.channel.send(f'{message.author.mention} message deleted: {", ".join(reasons)}', delete_after=3)
-                logger.info(f'ANTI-SPAM: deleted message from {message.author} - {reasons}')
+                await message.channel.send(f'{message.author.mention} Stop spamming!', delete_after=3)
             except: pass
             return
 
+    # Anti-link
+    if anti_link.enabled.get(message.guild.id):
+        if anti_link.is_link(message.content):
+            if not anti_link.is_url_whitelisted(message.guild.id, message.content):
+                if not anti_link.is_user_whitelisted(message.guild.id, message.author):
+                    try:
+                        await message.delete()
+                        await message.channel.send(f'{message.author.mention} Links are not allowed!', delete_after=3)
+                    except: pass
+                    return
 
+    
+    # Anti-spam detection
+    if anti_spam.enabled.get(message.guild.id) and not anti_spam.is_whitelisted(message.author):
+        anti_spam.add_message(message.guild.id, message.author.id)
+        
+        if anti_spam.is_spam(message.guild.id, message.author.id):
+            try:
+                await message.delete()
+                timeout_dur = anti_spam.get_timeout_duration(message.guild.id, message.author.id)
+                await message.author.timeout(timeout_dur, reason='anti-spam')
+                mins = int(timeout_dur.total_seconds() / 60)
+                await message.channel.send(f'{message.author.mention} timed out for {mins} min for spamming', delete_after=5)
+                logger.info(f'ANTI-SPAM: timed out {message.author}')
+                try:
+                    await send_log(message.guild, '🚨 ANTI-SPAM', f'timed out {message.author.mention}', COLORS['error'],
+                                 {'Messages': f"{len(anti_spam.messages[(message.guild.id, message.author.id)])}", 'Duration': f'{mins} min'})
+                except: pass
+            except Exception as e:
+                logger.error(f'anti-spam: {e}')
+            return
+        
+        is_spam_msg, reasons = anti_spam.check_message(message)
+        if is_spam_msg:
+            try:
+                await message.delete()
+                await message.channel.send(f'{message.author.mention} message deleted: {", ".join(reasons)}', delete_after=3)
+            except: pass
+            return
+    
+    # Anti-link detection
+    if anti_link.enabled.get(message.guild.id):
+        if anti_link.is_link(message.content):
+            if not anti_link.is_url_whitelisted(message.guild.id, message.content):
+                if not anti_link.is_whitelisted(message.author):
+                    try:
+                        await message.delete()
+                        await message.channel.send(f'{message.author.mention} no links allowed', delete_after=3)
+                    except: pass
+                    return
+    
+    await bot.process_commands(message)
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.reply('❌ You don\'t have permission')
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.reply(f'❌ Missing: `{error.param.name}`')
+    elif isinstance(error, commands.CheckFailure):
+        await ctx.reply('❌ You don\'t have the required role')
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.reply('❌ Member not found')
+    elif isinstance(error, commands.RoleNotFound):
+        await ctx.reply('❌ Role not found')
+    else:
+        logger.error(f'Unhandled error: {error}')
+
+# ==================== MAIN ====================
+
+async def main():
+    await start_web_server()
+    token = os.getenv('DISCORD_TOKEN')
+    if not token:
+        logger.error('DISCORD_TOKEN not found')
+        return
+    try:
+        await bot.start(token)
+    except KeyboardInterrupt:
+        logger.info('Shutting down')
+    finally:
+        await db.close()
+        await bot.close()
+
+if __name__ == '__main__':
+    asyncio.run(main())
+# COMPLETE ANTI-SYSTEM EVENTS AND COMMANDS
+# Add this to the end of the bot file
+
+# ==================== ANTI-NUKE EVENTS ====================
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    if not anti_nuke.enabled.get(channel.guild.id): return
+    try:
+        async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
+            if not anti_nuke.is_recent(entry.created_at): return
+            if not anti_nuke.is_after_restart(entry.created_at): return
+            if entry.target.id != channel.id: continue
+            
+            deleter = entry.user
+            if deleter.id == OWNER_ID: return
+            if deleter.id == bot.user.id: return
+            
+            deleter_member = channel.guild.get_member(deleter.id)
+            if anti_nuke.is_whitelisted(deleter_member): return
+            
+            anti_nuke.add_action(channel.guild.id, deleter.id, 'channel_deletes')
+            
+            if anti_nuke.check_nuke(channel.guild.id, deleter.id):
+                try:
+                    if deleter_member:
+                        for role in deleter_member.roles:
+                            if role.id != channel.guild.id:
+                                try: await deleter_member.remove_roles(role)
+                                except: pass
+                        await deleter_member.ban(reason='anti-nuke: mass channel deletion')
+                    logger.info(f'ANTI-NUKE: banned {deleter}')
+                    try:
+                        await send_log(channel.guild, '🚨 ANTI-NUKE', f'banned {deleter.mention} for mass channel deletion', 
+                                     COLORS['error'], {'User': str(deleter), 'Action': 'Mass Channel Deletion'})
+                    except: pass
+                except Exception as e:
+                    logger.error(f'anti-nuke: {e}')
+            break
+    except Exception as e:
+        logger.error(f'channel delete event: {e}')
+
+@bot.event
+async def on_member_ban(guild, user):
+    if not anti_nuke.enabled.get(guild.id): return
+    try:
+        async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
+            if not anti_nuke.is_recent(entry.created_at): return
+            if not anti_nuke.is_after_restart(entry.created_at): return
+            if entry.target.id != user.id: continue
+            
+            banner = entry.user
+            if banner.id == OWNER_ID: return
+            if banner.id == bot.user.id: return
+            
+            banner_member = guild.get_member(banner.id)
+            if anti_nuke.is_whitelisted(banner_member): return
+            
+            anti_nuke.add_action(guild.id, banner.id, 'bans')
+            
+            if anti_nuke.check_nuke(guild.id, banner.id):
+                try:
+                    if banner_member:
+                        for role in banner_member.roles:
+                            if role.id != guild.id:
+                                try: await banner_member.remove_roles(role)
+                                except: pass
+                        await banner_member.ban(reason='anti-nuke: mass banning')
+                    logger.info(f'ANTI-NUKE: banned {banner}')
+                    try:
+                        await send_log(guild, '🚨 ANTI-NUKE', f'banned {banner.mention} for mass banning users',
+                                     COLORS['error'], {'User': str(banner), 'Action': 'Mass Banning'})
+                    except: pass
+                except Exception as e:
+                    logger.error(f'anti-nuke: {e}')
+            break
+    except Exception as e:
+        logger.error(f'ban event: {e}')
+
+@bot.event
+async def on_member_remove(member):
+    if not anti_nuke.enabled.get(member.guild.id): return
+    try:
+        await asyncio.sleep(0.5)
+        async for entry in member.guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
+            if not anti_nuke.is_recent(entry.created_at): return
+            if not anti_nuke.is_after_restart(entry.created_at): return
+            if entry.target.id != member.id: continue
+            
+            kicker = entry.user
+            if kicker.id == OWNER_ID: return
+            if kicker.id == bot.user.id: return
+            
+            kicker_member = member.guild.get_member(kicker.id)
+            if anti_nuke.is_whitelisted(kicker_member): return
+            
+            anti_nuke.add_action(member.guild.id, kicker.id, 'kicks')
+            
+            if anti_nuke.check_nuke(member.guild.id, kicker.id):
+                try:
+                    if kicker_member:
+                        for role in kicker_member.roles:
+                            if role.id != member.guild.id:
+                                try: await kicker_member.remove_roles(role)
+                                except: pass
+                        await kicker_member.ban(reason='anti-nuke: mass kicking')
+                    logger.info(f'ANTI-NUKE: banned {kicker}')
+                    try:
+                        await send_log(member.guild, '🚨 ANTI-NUKE', f'banned {kicker.mention} for mass kicking users',
+                                     COLORS['error'], {'User': str(kicker), 'Action': 'Mass Kicking'})
+                    except: pass
+                except Exception as e:
+                    logger.error(f'anti-nuke: {e}')
+            break
+    except Exception as e:
+        logger.error(f'kick event: {e}')
+
+@bot.event
+async def on_guild_role_delete(role):
+    if not anti_nuke.enabled.get(role.guild.id): return
+    try:
+        async for entry in role.guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
+            if not anti_nuke.is_recent(entry.created_at): return
+            if not anti_nuke.is_after_restart(entry.created_at): return
+            if entry.target.id != role.id: continue
+            
+            deleter = entry.user
+            if deleter.id == OWNER_ID: return
+            if deleter.id == bot.user.id: return
+            
+            deleter_member = role.guild.get_member(deleter.id)
+            if anti_nuke.is_whitelisted(deleter_member): return
+            
+            anti_nuke.add_action(role.guild.id, deleter.id, 'role_deletes')
+            
+            if anti_nuke.check_nuke(role.guild.id, deleter.id):
+                try:
+                    if deleter_member:
+                        for r in deleter_member.roles:
+                            if r.id != role.guild.id:
+                                try: await deleter_member.remove_roles(r)
+                                except: pass
+                        await deleter_member.ban(reason='anti-nuke: mass role deletion')
+                    logger.info(f'ANTI-NUKE: banned {deleter}')
+                    try:
+                        await send_log(role.guild, '🚨 ANTI-NUKE', f'banned {deleter.mention} for mass role deletion',
+                                     COLORS['error'], {'User': str(deleter), 'Action': 'Mass Role Deletion'})
+                    except: pass
+                except Exception as e:
+                    logger.error(f'anti-nuke: {e}')
+            break
+    except Exception as e:
+        logger.error(f'role delete event: {e}')
+
+@bot.event
+async def on_guild_channel_create(channel):
+    if not anti_nuke.enabled.get(channel.guild.id): return
+    try:
+        async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_create):
+            if not anti_nuke.is_recent(entry.created_at): return
+            if not anti_nuke.is_after_restart(entry.created_at): return
+            if entry.target.id != channel.id: continue
+            
+            creator = entry.user
+            if creator.id == OWNER_ID: return
+            if creator.id == bot.user.id: return
+            
+            creator_member = channel.guild.get_member(creator.id)
+            if anti_nuke.is_whitelisted(creator_member): return
+            
+            anti_nuke.add_action(channel.guild.id, creator.id, 'channel_creates')
+            
+            if anti_nuke.check_nuke(channel.guild.id, creator.id):
+                try:
+                    if creator_member:
+                        for role in creator_member.roles:
+                            if role.id != channel.guild.id:
+                                try: await creator_member.remove_roles(role)
+                                except: pass
+                        await creator_member.ban(reason='anti-nuke: channel spam')
+                    logger.info(f'ANTI-NUKE: banned {creator}')
+                    try:
+                        await send_log(channel.guild, '🚨 ANTI-NUKE', f'banned {creator.mention} for channel spam',
+                                     COLORS['error'], {'User': str(creator), 'Action': 'Mass Channel Creation'})
+                    except: pass
+                except Exception as e:
+                    logger.error(f'anti-nuke: {e}')
+            break
+    except Exception as e:
+        logger.error(f'channel create event: {e}')
+
+@bot.event
+async def on_member_update(before, after):
+    if not anti_nuke.enabled.get(after.guild.id): return
+    if len(after.roles) > len(before.roles):
+        new_role = set(after.roles) - set(before.roles)
+        for role in new_role:
+            if role.managed:
+                try:
+                    async for entry in after.guild.audit_logs(limit=5, action=discord.AuditLogAction.bot_add):
+                        if not anti_nuke.is_recent(entry.created_at): continue
+                        if not anti_nuke.is_after_restart(entry.created_at): continue
+                        if entry.target.id != after.id: continue
+                        
+                        inviter = entry.user
+                        if inviter.id == OWNER_ID: return
+                        
+                        inviter_member = after.guild.get_member(inviter.id)
+                        if anti_nuke.is_whitelisted(inviter_member): return
+                        
+                        try:
+                            await after.kick(reason='anti-nuke: unauthorized bot')
+                            if inviter_member:
+                                await inviter_member.ban(reason='anti-nuke: added unauthorized bot')
+                            logger.info(f'ANTI-NUKE: kicked bot {after} and banned {inviter}')
+                            try:
+                                await send_log(after.guild, '🚨 ANTI-NUKE', f'kicked bot {after.mention} and banned {inviter.mention}',
+                                             COLORS['error'], {'Bot': str(after), 'Inviter': str(inviter)})
+                            except: pass
+                        except Exception as e:
+                            logger.error(f'anti-nuke bot: {e}')
+                        break
+                except Exception as e:
+                    logger.error(f'bot add event: {e}')
+
+@bot.event
+async def on_webhooks_update(channel):
+    if not anti_nuke.enabled.get(channel.guild.id): return
+    try:
+        async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.webhook_create):
+            if not anti_nuke.is_recent(entry.created_at): return
+            if not anti_nuke.is_after_restart(entry.created_at): return
+            
+            creator = entry.user
+            if creator.id == OWNER_ID: return
+            
+            creator_member = channel.guild.get_member(creator.id)
+            if anti_nuke.is_whitelisted(creator_member): return
+            
+            try:
+                webhooks = await channel.webhooks()
+                for webhook in webhooks:
+                    try:
+                        await webhook.delete(reason='anti-nuke')
+                    except: pass
+                
+                if creator_member:
+                    await creator_member.ban(reason='anti-nuke: webhook')
+                logger.info(f'ANTI-NUKE: deleted webhook and banned {creator}')
+                try:
+                    await send_log(channel.guild, '🚨 ANTI-NUKE', f'deleted webhook and banned {creator.mention}',
+                                 COLORS['error'], {'User': str(creator), 'Channel': channel.mention})
+                except: pass
+            except Exception as e:
+                logger.error(f'anti-nuke webhook: {e}')
+            break
+    except Exception as e:
+        logger.error(f'webhooks event: {e}')
+
+# ==================== ANTI-RAID EVENTS ====================
+
+@bot.event
+async def on_member_join(member):
+    if not anti_raid.enabled.get(member.guild.id): return
+    
+    try:
+        anti_raid.add_join(member.guild.id, member.id)
+        
+        if anti_raid.is_raid(member.guild.id):
+            try:
+                await member.kick(reason='anti-raid: join spam')
+                logger.info(f'ANTI-RAID: kicked {member} during raid')
+                try:
+                    await send_log(member.guild, '🚨 ANTI-RAID: JOIN SPAM', f'kicked {member.mention}',
+                                 COLORS['error'], {'Total Joins': f"{len(anti_raid.join_tracking[member.guild.id])}"})
+                except: pass
+            except Exception as e:
+                logger.error(f'anti-raid kick: {e}')
+            return
+        
+        is_sus, reasons = anti_raid.check_member(member)
+        if is_sus and not anti_raid.is_whitelisted(member):
+            settings = anti_raid.settings[member.guild.id]
+            action = settings['action']
+            
+            try:
+                if action == 'kick':
+                    await member.kick(reason=f"anti-raid: {', '.join(reasons)}")
+                elif action == 'ban':
+                    await member.ban(reason=f"anti-raid: {', '.join(reasons)}")
+                
+                logger.info(f'ANTI-RAID: {action} {member}')
+                try:
+                    await send_log(member.guild, f'🚨 ANTI-RAID', f'{action} {member.mention}',
+                                 COLORS['error'], {'Reasons': ', '.join(reasons)})
+                except: pass
+            except Exception as e:
+                logger.error(f'anti-raid: {e}')
+    
+    except Exception as e:
+        logger.error(f'member join event: {e}')
+
+# ==================== ANTI-REACT EVENT ====================
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if not payload.guild_id: return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild or not anti_react.enabled.get(guild.id): return
+    
+    member = guild.get_member(payload.user_id)
+    if not member or member.bot or anti_react.is_whitelisted(member): return
+    
+    anti_react.add_reaction(guild.id, member.id, payload.message_id)
+    
+    if anti_react.is_react_spam(guild.id, member.id):
+        settings = anti_react.settings[guild.id]
+        action = settings['action']
+        message_ids = anti_react.get_recent_messages(guild.id, member.id)
+        
+        try:
+            channel = guild.get_channel(payload.channel_id)
+            if channel:
+                for msg_id in message_ids:
+                    try:
+                        message = await channel.fetch_message(msg_id)
+                        await message.clear_reactions()
+                    except: pass
+            
+            if action == 'warn':
+                try:
+                    async with db.pool.acquire() as conn:
+                        await conn.execute('INSERT INTO warnings (guild_id, user_id, reason, warned_by) VALUES ($1, $2, $3, $4)',
+                                         guild.id, member.id, 'reaction spam', bot.user.id)
+                    await channel.send(f'{member.mention} warned for reaction spam', delete_after=5)
+                except: pass
+            elif action == 'timeout':
+                await member.timeout(timedelta(minutes=5), reason='reaction spam')
+                await channel.send(f'{member.mention} timed out for 5 min', delete_after=5)
+            elif action == 'kick':
+                await member.kick(reason='reaction spam')
+            
+            logger.info(f'ANTI-REACT: {action} {member}')
+            try:
+                await send_log(guild, '🚨 ANTI-REACT', f'{action} {member.mention}', COLORS['error'],
+                             {'Reactions': f"{len(anti_react.reactions[(guild.id, member.id)])}", 'Messages': f"{len(message_ids)}"})
+            except: pass
+        except Exception as e:
+            logger.error(f'anti-react: {e}')
+
+# ==================== ANTI-NUKE COMMANDS ====================
+
+@bot.group(name='anti-nuke', invoke_without_command=True)
+@is_owner()
+async def anti_nuke_group(ctx):
+    embed = discord.Embed(title='🛡️ anti-nuke', color=COLORS['support'])
+    embed.add_field(name='control', value='`$anti-nuke enable/disable/status`')
+    embed.add_field(name='whitelist', value='`$anti-nuke whitelist/unwhitelist @role`')
+    await ctx.reply(embed=embed)
+
+@anti_nuke_group.command(name='enable')
+@is_owner()
+async def anti_nuke_enable(ctx):
+    if anti_nuke.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already enabled')
+    anti_nuke.enabled[ctx.guild.id] = True
+    embed = discord.Embed(title='✅ anti-nuke enabled', description='protects against mass bans/kicks/deletes, unauthorized bots/webhooks', color=COLORS['success'])
+    await ctx.reply(embed=embed)
+    try:
+        await send_log(ctx.guild, '🛡️ anti-nuke enabled', f'by {ctx.author.mention}', COLORS['success'])
+    except: pass
+
+@anti_nuke_group.command(name='disable')
+@is_owner()
+async def anti_nuke_disable(ctx):
+    if not anti_nuke.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already disabled')
+    anti_nuke.enabled[ctx.guild.id] = False
+    await ctx.reply(embed=discord.Embed(title='✅ anti-nuke disabled', color=COLORS['support']))
+    try:
+        await send_log(ctx.guild, '🛡️ anti-nuke disabled', f'by {ctx.author.mention}', COLORS['error'])
+    except: pass
+
+@anti_nuke_group.command(name='whitelist')
+@is_owner()
+async def anti_nuke_whitelist(ctx, role: discord.Role = None):
+    if not role: return await ctx.reply('❌ specify role')
+    if role.id in anti_nuke.whitelisted_roles.get(ctx.guild.id, []):
+        return await ctx.reply('❌ already whitelisted')
+    anti_nuke.whitelisted_roles[ctx.guild.id].append(role.id)
+    await ctx.reply(embed=discord.Embed(title='✅ whitelisted', description=f'{role.mention} bypasses anti-nuke', color=COLORS['success']))
+
+@anti_nuke_group.command(name='unwhitelist')
+@is_owner()
+async def anti_nuke_unwhitelist(ctx, role: discord.Role = None):
+    if not role: return await ctx.reply('❌ specify role')
+    if role.id not in anti_nuke.whitelisted_roles.get(ctx.guild.id, []):
+        return await ctx.reply('❌ not whitelisted')
+    anti_nuke.whitelisted_roles[ctx.guild.id].remove(role.id)
+    await ctx.reply(embed=discord.Embed(title='✅ removed', color=COLORS['success']))
+
+@anti_nuke_group.command(name='status')
+@is_owner()
+async def anti_nuke_status(ctx):
+    enabled = anti_nuke.enabled.get(ctx.guild.id, False)
+    wl_roles = anti_nuke.whitelisted_roles.get(ctx.guild.id, [])
+    embed = discord.Embed(title='🛡️ anti-nuke status', color=COLORS['success'] if enabled else COLORS['error'])
+    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled')
+    embed.add_field(name='whitelisted', value=str(len(wl_roles)))
+    if wl_roles:
+        roles = []
+        for rid in wl_roles[:5]:
+            r = ctx.guild.get_role(rid)
+            if r: roles.append(r.mention)
+        if roles:
+            embed.add_field(name='roles', value='\n'.join(roles), inline=False)
+    await ctx.reply(embed=embed)
+
+# ==================== ANTI-RAID COMMANDS ====================
+
+@bot.group(name='anti-raid', invoke_without_command=True)
+@is_owner()
+async def anti_raid_group(ctx):
+    embed = discord.Embed(title='🛡️ anti-raid', color=COLORS['support'])
+    embed.add_field(name='control', value='`$anti-raid enable/disable/status`')
+    embed.add_field(name='settings', value='`$anti-raid action/accountage/avatar`')
+    await ctx.reply(embed=embed)
+
+@anti_raid_group.command(name='enable')
+@is_owner()
+async def anti_raid_enable(ctx):
+    if anti_raid.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already enabled')
+    anti_raid.enabled[ctx.guild.id] = True
+    await ctx.reply(embed=discord.Embed(title='✅ anti-raid enabled', description='detects join spam, new accounts, no avatars', color=COLORS['success']))
+
+@anti_raid_group.command(name='disable')
+@is_owner()
+async def anti_raid_disable(ctx):
+    if not anti_raid.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already disabled')
+    anti_raid.enabled[ctx.guild.id] = False
+    await ctx.reply(embed=discord.Embed(title='✅ anti-raid disabled', color=COLORS['support']))
+
+@anti_raid_group.command(name='action')
+@is_owner()
+async def anti_raid_action(ctx, action: str = None):
+    if not action or action not in ['kick', 'ban']:
+        return await ctx.reply('❌ usage: `$anti-raid action <kick/ban>`')
+    anti_raid.settings[ctx.guild.id]['action'] = action
+    await ctx.reply(embed=discord.Embed(title='✅ updated', description=f'action: {action}', color=COLORS['success']))
+
+@anti_raid_group.command(name='accountage')
+@is_owner()
+async def anti_raid_accountage(ctx, days: int = None):
+    if not days or days < 0 or days > 365:
+        return await ctx.reply('❌ usage: `$anti-raid accountage <1-365>`')
+    anti_raid.settings[ctx.guild.id]['min_account_age'] = days
+    await ctx.reply(embed=discord.Embed(title='✅ updated', description=f'min age: {days} days', color=COLORS['success']))
+
+@anti_raid_group.command(name='avatar')
+@is_owner()
+async def anti_raid_avatar(ctx, toggle: str = None):
+    if not toggle or toggle not in ['on', 'off']:
+        return await ctx.reply('❌ usage: `$anti-raid avatar <on/off>`')
+    anti_raid.settings[ctx.guild.id]['require_avatar'] = (toggle == 'on')
+    await ctx.reply(embed=discord.Embed(title='✅ updated', description=f'avatar: {toggle}', color=COLORS['success']))
+
+@anti_raid_group.command(name='status')
+@is_owner()
+async def anti_raid_status(ctx):
+    enabled = anti_raid.enabled.get(ctx.guild.id, False)
+    settings = anti_raid.settings[ctx.guild.id]
+    embed = discord.Embed(title='🛡️ anti-raid status', color=COLORS['success'] if enabled else COLORS['error'])
+    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled')
+    embed.add_field(name='action', value=settings['action'])
+    embed.add_field(name='settings', value=f"age: {settings['min_account_age']}d\navatar: {'yes' if settings['require_avatar'] else 'no'}", inline=False)
+    await ctx.reply(embed=embed)
+
+# ==================== ANTI-SPAM COMMANDS ====================
+
+@bot.group(name='anti-spam', invoke_without_command=True)
+@is_owner()
+async def anti_spam_group(ctx):
+    embed = discord.Embed(title='🛡️ anti-spam', color=COLORS['support'])
+    embed.add_field(name='control', value='`$anti-spam enable/disable/status`')
+    embed.add_field(name='whitelist', value='`$anti-spam whitelist/unwhitelist @role`')
+    await ctx.reply(embed=embed)
+
+@anti_spam_group.command(name='enable')
+@is_owner()
+async def anti_spam_enable(ctx):
+    if anti_spam.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already enabled')
+    anti_spam.enabled[ctx.guild.id] = True
+    await ctx.reply(embed=discord.Embed(title='✅ anti-spam enabled', description='detects 7+ msgs in 10s, escalating timeouts', color=COLORS['success']))
+
+@anti_spam_group.command(name='disable')
+@is_owner()
+async def anti_spam_disable(ctx):
+    if not anti_spam.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already disabled')
+    anti_spam.enabled[ctx.guild.id] = False
+    await ctx.reply(embed=discord.Embed(title='✅ anti-spam disabled', color=COLORS['support']))
+
+@anti_spam_group.command(name='whitelist')
+@is_owner()
+async def anti_spam_whitelist(ctx, role: discord.Role = None):
+    if not role: return await ctx.reply('❌ specify role')
+    if role.id in anti_spam.whitelisted_roles.get(ctx.guild.id, []):
+        return await ctx.reply('❌ already whitelisted')
+    anti_spam.whitelisted_roles[ctx.guild.id].append(role.id)
+    await ctx.reply(embed=discord.Embed(title='✅ whitelisted', color=COLORS['success']))
+
+@anti_spam_group.command(name='unwhitelist')
+@is_owner()
+async def anti_spam_unwhitelist(ctx, role: discord.Role = None):
+    if not role: return await ctx.reply('❌ specify role')
+    if role.id not in anti_spam.whitelisted_roles.get(ctx.guild.id, []):
+        return await ctx.reply('❌ not whitelisted')
+    anti_spam.whitelisted_roles[ctx.guild.id].remove(role.id)
+    await ctx.reply(embed=discord.Embed(title='✅ removed', color=COLORS['success']))
+
+@anti_spam_group.command(name='status')
+@is_owner()
+async def anti_spam_status(ctx):
+    enabled = anti_spam.enabled.get(ctx.guild.id, False)
+    embed = discord.Embed(title='🛡️ anti-spam status', color=COLORS['success'] if enabled else COLORS['error'])
+    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled')
+    await ctx.reply(embed=embed)
+
+# ==================== ANTI-LINK COMMANDS ====================
+
+@bot.group(name='anti-link', invoke_without_command=True)
+@is_owner()
+async def anti_link_group(ctx):
+    embed = discord.Embed(title='🔗 anti-link', color=COLORS['support'])
+    embed.add_field(name='control', value='`$anti-link enable/disable/status`')
+    embed.add_field(name='whitelist', value='`$anti-link role/unrole @role`')
+    await ctx.reply(embed=embed)
+
+@anti_link_group.command(name='enable')
+@is_owner()
+async def anti_link_enable(ctx):
+    if anti_link.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already enabled')
+    anti_link.enabled[ctx.guild.id] = True
+    await ctx.reply(embed=discord.Embed(title='✅ anti-link enabled', description='blocks all links unless whitelisted', color=COLORS['success']))
+
+@anti_link_group.command(name='disable')
+@is_owner()
+async def anti_link_disable(ctx):
+    if not anti_link.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already disabled')
+    anti_link.enabled[ctx.guild.id] = False
+    await ctx.reply(embed=discord.Embed(title='✅ anti-link disabled', color=COLORS['support']))
+
+@anti_link_group.command(name='role')
+@is_owner()
+async def anti_link_role(ctx, role: discord.Role = None):
+    if not role: return await ctx.reply('❌ specify role')
+    if role.id in anti_link.whitelisted_roles.get(ctx.guild.id, []):
+        return await ctx.reply('❌ already whitelisted')
+    anti_link.whitelisted_roles[ctx.guild.id].append(role.id)
+    await ctx.reply(embed=discord.Embed(title='✅ whitelisted', description=f'{role.mention} can post links', color=COLORS['success']))
+
+@anti_link_group.command(name='unrole')
+@is_owner()
+async def anti_link_unrole(ctx, role: discord.Role = None):
+    if not role: return await ctx.reply('❌ specify role')
+    if role.id not in anti_link.whitelisted_roles.get(ctx.guild.id, []):
+        return await ctx.reply('❌ not whitelisted')
+    anti_link.whitelisted_roles[ctx.guild.id].remove(role.id)
+    await ctx.reply(embed=discord.Embed(title='✅ removed', color=COLORS['success']))
+
+@anti_link_group.command(name='status')
+@is_owner()
+async def anti_link_status(ctx):
+    enabled = anti_link.enabled.get(ctx.guild.id, False)
+    wl_roles = anti_link.whitelisted_roles.get(ctx.guild.id, [])
+    embed = discord.Embed(title='🔗 anti-link status', color=COLORS['success'] if enabled else COLORS['error'])
+    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled')
+    embed.add_field(name='whitelisted', value=str(len(wl_roles)))
+    await ctx.reply(embed=embed)
+
+# ==================== ANTI-REACT COMMANDS ====================
+
+@bot.group(name='anti-react', invoke_without_command=True)
+@is_owner()
+async def anti_react_group(ctx):
+    embed = discord.Embed(title='🛡️ anti-react', color=COLORS['support'])
+    embed.add_field(name='control', value='`$anti-react enable/disable/status`')
+    embed.add_field(name='settings', value='`$anti-react action <warn/timeout/kick>`')
+    await ctx.reply(embed=embed)
+
+@anti_react_group.command(name='enable')
+@is_owner()
+async def anti_react_enable(ctx):
+    if anti_react.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already enabled')
+    anti_react.enabled[ctx.guild.id] = True
+    await ctx.reply(embed=discord.Embed(title='✅ anti-react enabled', description='detects 10+ reactions in 10s across 5+ messages', color=COLORS['success']))
+
+@anti_react_group.command(name='disable')
+@is_owner()
+async def anti_react_disable(ctx):
+    if not anti_react.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already disabled')
+    anti_react.enabled[ctx.guild.id] = False
+    await ctx.reply(embed=discord.Embed(title='✅ anti-react disabled', color=COLORS['support']))
+
+@anti_react_group.command(name='action')
+@is_owner()
+async def anti_react_action(ctx, action: str = None):
+    if not action or action not in ['warn', 'timeout', 'kick']:
+        return await ctx.reply('❌ usage: `$anti-react action <warn/timeout/kick>`')
+    anti_react.settings[ctx.guild.id]['action'] = action
+    await ctx.reply(embed=discord.Embed(title='✅ updated', description=f'action: {action}', color=COLORS['success']))
+
+@anti_react_group.command(name='status')
+@is_owner()
+async def anti_react_status(ctx):
+    enabled = anti_react.enabled.get(ctx.guild.id, False)
+    settings = anti_react.settings[ctx.guild.id]
+    embed = discord.Embed(title='🛡️ anti-react status', color=COLORS['success'] if enabled else COLORS['error'])
+    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled')
+    embed.add_field(name='action', value=settings['action'])
+    await ctx.reply(embed=embed)
+
+    # Auto-remove AFK when user sends message
+    if message.author.id in afk_users:
+        original = afk_users[message.author.id].get('original_nick')
+        del afk_users[message.author.id]
+        try:
+            if message.author.display_name.startswith('[AFK]'):
+                await message.author.edit(nick=original if original else None, reason='AFK auto-removed')
+            await message.channel.send(f'Welcome back {message.author.mention}!', delete_after=3)
+        except: pass
+    
+
+# AUTOMOD COMMANDS
+@bot.group(name='automod', invoke_without_command=True)
+@is_owner()
+async def automod_group(ctx):
+    embed = discord.Embed(title='🤖 automod', color=COLORS['support'])
+    embed.add_field(name='control', value='`$automod enable/disable/status`')
+    embed.add_field(name='words', value='`$automod add/remove/list <word>`')
+    await ctx.reply(embed=embed)
+
+@automod_group.command(name='enable')
+@is_owner()
+async def automod_enable(ctx):
+    if automod.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already enabled')
+    automod.enabled[ctx.guild.id] = True
+    await ctx.reply(embed=discord.Embed(title='✅ automod enabled', description='filters bad words (staff bypass)', color=COLORS['success']))
+
+@automod_group.command(name='disable')
+@is_owner()
+async def automod_disable(ctx):
+    if not automod.enabled.get(ctx.guild.id):
+        return await ctx.reply('❌ already disabled')
+    automod.enabled[ctx.guild.id] = False
+    await ctx.reply(embed=discord.Embed(title='✅ automod disabled', color=COLORS['support']))
+
+@automod_group.command(name='add')
+@is_owner()
+async def automod_add(ctx, *, word: str = None):
+    if not word:
+        return await ctx.reply('❌ specify word')
+    if automod.add_word(ctx.guild.id, word):
+        await ctx.reply(embed=discord.Embed(title='✅ added', description=f'added ||{word}|| to filter', color=COLORS['success']))
+    else:
+        await ctx.reply('❌ already in filter')
+
+@automod_group.command(name='remove')
+@is_owner()
+async def automod_remove(ctx, *, word: str = None):
+    if not word:
+        return await ctx.reply('❌ specify word')
+    if automod.remove_word(ctx.guild.id, word):
+        await ctx.reply(embed=discord.Embed(title='✅ removed', color=COLORS['success']))
+    else:
+        await ctx.reply('❌ not in filter')
+
+@automod_group.command(name='list')
+@is_owner()
+async def automod_list(ctx):
+    words = automod.bad_words.get(ctx.guild.id, [])
+    if not words:
+        return await ctx.reply('no words in filter')
+    
+    spoilered = [f'||{w}||' for w in words[:20]]
+    embed = discord.Embed(title='🤖 automod filter', description='\n'.join(spoilered), color=COLORS['support'])
+    if len(words) > 20:
+        embed.set_footer(text=f'{len(words)-20} more words...')
+    await ctx.reply(embed=embed)
+
+@automod_group.command(name='status')
+@is_owner()
+async def automod_status(ctx):
+    enabled = automod.enabled.get(ctx.guild.id, False)
+    words = len(automod.bad_words.get(ctx.guild.id, []))
+    embed = discord.Embed(title='🤖 automod status', color=COLORS['success'] if enabled else COLORS['error'])
+    embed.add_field(name='status', value='✅ enabled' if enabled else '❌ disabled')
+    embed.add_field(name='words', value=str(words))
+    embed.add_field(name='staff bypass', value='yes', inline=False)
+    await ctx.reply(embed=embed)
