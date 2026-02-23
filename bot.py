@@ -1767,14 +1767,6 @@ async def afkoff_cmd(ctx):
     else:
         await ctx.reply('❌ not afk', delete_after=5)
 
-@bot.command(name='afkoff')
-async def afkoff_cmd(ctx):
-    if ctx.author.id in afk_users:
-        del afk_users[ctx.author.id]
-        await ctx.reply(embed=discord.Embed(title='✅ AFK Removed', description='You are no longer AFK', color=COLORS['success']))
-    else:
-        await ctx.reply('❌ You are not AFK')
-
 @bot.command(name='snipe', aliases=['sn'])
 async def snipe_cmd(ctx):
     data = snipe_data.get(ctx.channel.id)
