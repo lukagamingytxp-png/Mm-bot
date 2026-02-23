@@ -372,6 +372,185 @@ class Lockdown:
 
 lockdown = Lockdown()
 
+
+# GIVEAWAY SYSTEM - React to enter
+# Add this after the lockdown class
+
+class GiveawaySystem:
+    def __init__(self):
+        self.active_giveaways = {}  # message_id: giveaway_data
+    
+    async def create_giveaway(self, ctx, duration: timedelta, winners: int, prize: str):
+        """Create a giveaway"""
+        end_time = datetime.now(timezone.utc) + duration
+        
+        embed = discord.Embed(title='🎉 GIVEAWAY 🎉', color=0xF1C40F)
+        embed.add_field(name='Prize', value=prize, inline=False)
+        embed.add_field(name='Winners', value=str(winners), inline=True)
+        embed.add_field(name='Ends', value=f'<t:{int(end_time.timestamp())}:R>', inline=True)
+        embed.add_field(name='How to Enter', value='React with 🎉 to enter!', inline=False)
+        embed.set_footer(text=f'Hosted by {ctx.author.display_name}')
+        
+        msg = await ctx.send(embed=embed)
+        await msg.add_reaction('🎉')
+        
+        self.active_giveaways[msg.id] = {
+            'message_id': msg.id,
+            'channel_id': ctx.channel.id,
+            'guild_id': ctx.guild.id,
+            'prize': prize,
+            'winners': winners,
+            'host': ctx.author.id,
+            'end_time': end_time,
+            'ended': False
+        }
+        
+        return msg.id
+    
+    async def end_giveaway(self, bot, giveaway_id, reroll=False):
+        """End a giveaway and pick winners"""
+        if giveaway_id not in self.active_giveaways:
+            return None, "Giveaway not found"
+        
+        gdata = self.active_giveaways[giveaway_id]
+        
+        try:
+            guild = bot.get_guild(gdata['guild_id'])
+            channel = guild.get_channel(gdata['channel_id'])
+            message = await channel.fetch_message(gdata['message_id'])
+            
+            # Get all users who reacted with 🎉
+            reaction = None
+            for r in message.reactions:
+                if str(r.emoji) == '🎉':
+                    reaction = r
+                    break
+            
+            if not reaction:
+                return None, "No one entered"
+            
+            # Get all users (exclude bots)
+            users = []
+            async for user in reaction.users():
+                if not user.bot:
+                    users.append(user)
+            
+            if not users:
+                return None, "No valid entries"
+            
+            # Pick random winners
+            import random
+            winners_count = min(gdata['winners'], len(users))
+            winners = random.sample(users, winners_count)
+            
+            # Announce winners
+            winner_mentions = ' '.join([w.mention for w in winners])
+            
+            embed = discord.Embed(title='🎉 GIVEAWAY ENDED 🎉', color=0x2ECC71)
+            embed.add_field(name='Prize', value=gdata['prize'], inline=False)
+            embed.add_field(name='Winners', value=winner_mentions, inline=False)
+            embed.set_footer(text=f"Hosted by {guild.get_member(gdata['host']).display_name}")
+            
+            await message.edit(embed=embed)
+            await channel.send(f'🎉 Congratulations {winner_mentions}! You won **{gdata["prize"]}**!')
+            
+            if not reroll:
+                gdata['ended'] = True
+            
+            return winners, None
+            
+        except Exception as e:
+            return None, str(e)
+
+giveaway = GiveawaySystem()
+
+# GIVEAWAY COMMANDS
+
+@bot.group(name='giveaway', aliases=['g'], invoke_without_command=True)
+async def giveaway_group(ctx):
+    embed = discord.Embed(title='🎉 giveaway system', color=COLORS['support'])
+    embed.add_field(name='create', value='`$giveaway start <time> <winners> <prize>`\nExample: `$g start 1h 3 Nitro`')
+    embed.add_field(name='manage', value='`$giveaway end <message_id>`\n`$giveaway reroll <message_id>`')
+    await ctx.reply(embed=embed)
+
+@giveaway_group.command(name='start', aliases=['create'])
+@commands.has_permissions(manage_guild=True)
+async def giveaway_start(ctx, duration: str, winners: int, *, prize: str):
+    """Start a giveaway
+    Example: $giveaway start 1h 3 Discord Nitro"""
+    
+    if winners < 1 or winners > 20:
+        return await ctx.reply('❌ winners must be 1-20')
+    
+    try:
+        # Parse duration
+        dur = parse_duration(duration)
+        if not dur:
+            return await ctx.reply('❌ invalid duration\n\nExamples: 1h, 30m, 1d, 2h30m')
+        
+        if dur.total_seconds() < 60:
+            return await ctx.reply('❌ giveaway must be at least 1 minute')
+        
+        if dur.total_seconds() > 604800:  # 7 days
+            return await ctx.reply('❌ giveaway cant be longer than 7 days')
+        
+        await ctx.message.delete()
+        giveaway_id = await giveaway.create_giveaway(ctx, dur, winners, prize)
+        
+        logger.info(f'GIVEAWAY: {ctx.author} started giveaway for {prize}')
+        
+        # Schedule auto-end
+        async def auto_end():
+            await asyncio.sleep(dur.total_seconds())
+            await giveaway.end_giveaway(bot, giveaway_id)
+        
+        bot.loop.create_task(auto_end())
+        
+    except Exception as e:
+        await ctx.reply(f'❌ error: {e}')
+
+@giveaway_group.command(name='end')
+@commands.has_permissions(manage_guild=True)
+async def giveaway_end(ctx, message_id: int):
+    """End a giveaway early"""
+    winners, error = await giveaway.end_giveaway(bot, message_id)
+    
+    if error:
+        return await ctx.reply(f'❌ {error}')
+    
+    await ctx.reply(f'✅ giveaway ended - {len(winners)} winner(s) picked')
+
+@giveaway_group.command(name='reroll')
+@commands.has_permissions(manage_guild=True)
+async def giveaway_reroll(ctx, message_id: int):
+    """Reroll giveaway winners"""
+    winners, error = await giveaway.end_giveaway(bot, message_id, reroll=True)
+    
+    if error:
+        return await ctx.reply(f'❌ {error}')
+    
+    winner_mentions = ' '.join([w.mention for w in winners])
+    await ctx.send(f'🎉 **REROLL** - New winner(s): {winner_mentions}!')
+
+@giveaway_group.command(name='list')
+async def giveaway_list(ctx):
+    """List active giveaways"""
+    active = [g for g in giveaway.active_giveaways.values() if not g['ended'] and g['guild_id'] == ctx.guild.id]
+    
+    if not active:
+        return await ctx.reply('no active giveaways')
+    
+    embed = discord.Embed(title='🎉 active giveaways', color=COLORS['support'])
+    for g in active[:10]:
+        channel = ctx.guild.get_channel(g['channel_id'])
+        embed.add_field(
+            name=g['prize'],
+            value=f"Channel: {channel.mention}\nEnds: <t:{int(g['end_time'].timestamp())}:R>\nWinners: {g['winners']}",
+            inline=False
+        )
+    
+    await ctx.reply(embed=embed)
+
 class Lockdown:
     def __init__(self):
         self.locked_channels = defaultdict(list)
@@ -1924,110 +2103,90 @@ class HelpView(View):
 
 @bot.command(name='help')
 async def help_cmd(ctx):
+    """Show ALL commands to everyone"""
     pages = []
-    is_admin = ctx.author.guild_permissions.administrator or ctx.author.id == OWNER_ID
-    has_admin = is_admin
-    if not has_admin:
-        admin_role_id = admin_perms.get(ctx.guild.id)
-        if admin_role_id:
-            admin_role = ctx.guild.get_role(admin_role_id)
-            if admin_role:
-                for role in ctx.author.roles:
-                    if role >= admin_role:
-                        has_admin = True
-    has_mod = has_admin
-    if not has_mod:
-        mod_role_id = mod_perms.get(ctx.guild.id)
-        if mod_role_id:
-            mod_role = ctx.guild.get_role(mod_role_id)
-            if mod_role:
-                for role in ctx.author.roles:
-                    if role >= mod_role:
-                        has_mod = True
-
-    total_pages = 3
-    if has_mod: total_pages += 2
-    if has_admin: total_pages += 1
-    if ctx.author.id == OWNER_ID: total_pages += 3
-
-    # PAGE 1 - Tickets
-    e1 = discord.Embed(title='🎫 Ticket Commands', color=0x5865F2)
-    e1.add_field(name='Manage', value='`$close` `$claim` `$unclaim`', inline=False)
-    e1.add_field(name='Users', value='`$add @user` `$remove @user`', inline=False)
-    e1.add_field(name='Edit', value='`$rename <name>` `$transfer @user`', inline=False)
-    e1.add_field(name='Trade', value='`$proof` - Post completion proof', inline=False)
-    e1.set_footer(text=f'Page 1/{total_pages}')
+    
+    # PAGE 1 - Tickets (Everyone)
+    e1 = discord.Embed(title='🎫 ticket commands', color=0x5865F2)
+    e1.add_field(name='manage', value='`$close` `$claim` `$unclaim`', inline=False)
+    e1.add_field(name='users', value='`$add @user` `$remove @user`', inline=False)
+    e1.add_field(name='edit', value='`$rename <name>` `$transfer @user`', inline=False)
+    e1.add_field(name='trade', value='`$proof` - post completion proof', inline=False)
+    e1.set_footer(text='page 1/10')
     pages.append(e1)
-
-    # PAGE 2 - Utility
-    e2 = discord.Embed(title='🛠️ Utility Commands', color=0x5865F2)
-    e2.add_field(name='💬 Social', value='`$afk <reason>` `$afkoff`', inline=False)
-    e2.add_field(name='📊 Info', value='`$userinfo` / `$ui` - User info\n`$serverinfo` / `$si` - Server info\n`$roleinfo` / `$ri` - Role info\n`$membercount` / `$mc` - Member count\n`$botinfo` / `$bi` - Bot stats\n`$ping` - Latency', inline=False)
-    e2.add_field(name='🖼️ Media', value='`$avatar` / `$av` - User avatar\n`$banner` / `$bn` - User banner', inline=False)
-    e2.add_field(name='👀 Snipe', value='`$snipe` / `$sn` - Deleted messages\n`$editsnipe` / `$es` - Edited messages', inline=False)
-    e2.set_footer(text=f'Page 2/{total_pages}')
+    
+    # PAGE 2 - Utility (Everyone)
+    e2 = discord.Embed(title='🛠️ utility commands', color=0x5865F2)
+    e2.add_field(name='💬 social', value='`$afk <reason>` `$afkoff`', inline=False)
+    e2.add_field(name='📊 info', value='`$userinfo` / `$ui`\n`$serverinfo` / `$si`\n`$roleinfo @role` / `$ri`\n`$membercount` / `$mc`\n`$botinfo` / `$bi`\n`$ping`', inline=False)
+    e2.add_field(name='🖼️ media', value='`$avatar [@user]` / `$av`\n`$banner [@user]` / `$bn`', inline=False)
+    e2.add_field(name='👀 snipe', value='`$snipe` / `$sn` - deleted\n`$editsnipe` / `$es` - edited', inline=False)
+    e2.set_footer(text='page 2/10')
     pages.append(e2)
-
+    
     # PAGE 3 - Admin Setup
-    e3 = discord.Embed(title='⚙️ Setup Commands', description='Administrator only', color=0x5865F2)
-    e3.add_field(name='🎫 Ticket Setup', value='`$setup` - Create panel\n`$setcategory #cat` - Set category\n`$setlogs #channel` - Set logs\n`$config` - View config', inline=False)
-    e3.add_field(name='🚔 Jail', value='`$jail @user <reason>`\n`$unjail @user`\n`$jailed` - List jailed', inline=False)
-    e3.add_field(name='🚫 Blacklist', value='`$blacklist @user <reason>`\n`$unblacklist @user`\n`$blacklists` - View list', inline=False)
-    e3.add_field(name='🧹 Cleanup', value='`$clear` - Delete bot messages\n`$purge <amount> [@user]` - Bulk delete', inline=False)
-    e3.set_footer(text=f'Page 3/{total_pages}')
+    e3 = discord.Embed(title='⚙️ setup commands', description='**requires:** administrator', color=0x5865F2)
+    e3.add_field(name='🎫 tickets', value='`$setup` - create panel\n`$setcategory #cat`\n`$setlogs #channel`\n`$config` - view settings', inline=False)
+    e3.add_field(name='🚔 jail', value='`$jail @user <reason>`\n`$unjail @user`\n`$jailed` - list jailed', inline=False)
+    e3.add_field(name='🚫 blacklist', value='`$blacklist @user <reason>`\n`$unblacklist @user`\n`$blacklists` - view list', inline=False)
+    e3.add_field(name='🧹 cleanup', value='`$clear` - delete bot msgs\n`$purge <amount> [@user]`', inline=False)
+    e3.set_footer(text='page 3/10')
     pages.append(e3)
-
-    if has_mod:
-        # PAGE 4 - Moderation
-        e4 = discord.Embed(title='🛡️ Moderation Commands', description='Mod role required', color=0x5865F2)
-        e4.add_field(name='🔇 Mute', value='`$mute` / `$m @user <time> <reason>`\nTime: `10s` `5m` `1h` `1d`\n`$unmute` / `$um @user`', inline=False)
-        e4.add_field(name='⚠️ Warn', value='`$warn` / `$w @user <reason>`\n`$warnings` / `$ws @user`\n`$clearwarnings` / `$cw @user`', inline=False)
-        e4.add_field(name='✏️ Other', value='`$nick` / `$n @user <name>` - Change nickname', inline=False)
-        e4.set_footer(text=f'Page 4/{total_pages}')
-        pages.append(e4)
-
-        # PAGE 5 - Admin Actions
-        e5 = discord.Embed(title='🔨 Admin Commands', description='Admin role required', color=0x5865F2)
-        e5.add_field(name='🚪 Ban & Kick', value='`$ban` / `$b @user <reason>`\n`$unban` / `$ub <ID>`\n`$hackban` / `$hb <ID> <reason>`\n`$unhackban` / `$uhb <ID>`\n`$kick` / `$k @user <reason>`', inline=False)
-        e5.add_field(name='🎭 Role', value='`$role` / `$r @user <rolename>`\nAdd/remove role by name', inline=False)
-        e5.add_field(name='🔒 Channel', value='`$slowmode` / `$sm <seconds>`\n`$lock` / `$lk` - Lock channel\n`$unlock` / `$ulk` - Unlock channel\n`$hide` / `$hd` - Hide channel\n`$unhide` / `$uhd` - Unhide channel', inline=False)
-        e5.set_footer(text=f'Page 5/{total_pages}')
-        pages.append(e5)
-
-    if is_admin:
-        # PAGE 6 - Perm Setup
-        e6 = discord.Embed(title='⚙️ Permission Setup', description='Administrator only', color=0x5865F2)
-        e6.add_field(name='👑 Admin Role', value='`$adminperms set @role` / `$ap set`\n`$adminperms show` / `$ap show`\nGives access to: ban kick hackban role slowmode lock hide warn mute purge', inline=False)
-        e6.add_field(name='🛡️ Mod Role', value='`$modperms set @role` / `$mp set`\n`$modperms show` / `$mp show`\nGives access to: mute warn nick', inline=False)
-        e6.set_footer(text=f'Page 6/{total_pages}')
-        pages.append(e6)
-
-    if ctx.author.id == OWNER_ID:
-        # PAGE 7 - Owner Whitelist
-        e7 = discord.Embed(title='🛡️ Whitelist System', description='Owner only', color=0x5865F2)
-        e7.add_field(name='Add', value='`$whitelist anti-link @Role/@Member`\n`$whitelist anti-spam @Role/@Member`\n`$whitelist anti-nuke @Role/@Member`', inline=False)
-        e7.add_field(name='Remove', value='`$unwhitelist anti-link @Role/@Member`\n`$unwhitelist anti-spam @Role/@Member`\n`$unwhitelist anti-nuke @Role/@Member`', inline=False)
-        e7.add_field(name='View', value='`$whitelisted anti-link`\n`$whitelisted anti-spam`\n`$whitelisted anti-nuke`', inline=False)
-        e7.set_footer(text=f'Page 7/{total_pages}')
-        pages.append(e7)
-
-        # PAGE 8 - Owner Protection
-        e8 = discord.Embed(title='🛡️ Protection Systems', description='Owner only', color=0x5865F2)
-        e8.add_field(name='🔗 Anti-Link', value='`$anti-link enable/disable/status`\n`$anti-link whitelist add/remove/list <url>`', inline=False)
-        e8.add_field(name='💬 Anti-Spam', value='`$anti-spam enable/disable/status`', inline=False)
-        e8.add_field(name='💣 Anti-Nuke', value='`$anti-nuke enable/disable/status`', inline=False)
-        e8.add_field(name='🔐 Server Lock', value='`$lockdown` - Lock all channels\n`$unlockdown` - Unlock all', inline=False)
-        e8.set_footer(text=f'Page 8/{total_pages}')
-        pages.append(e8)
-
-        # PAGE 9 - Owner Advanced
-        e9 = discord.Embed(title='⚙️ Advanced Settings', description='Owner only', color=0x5865F2)
-        e9.add_field(name='Channel Permissions', value='`$channelperm #ch @target enable/disable <perm>`\n`$channelpermall @target enable/disable <perm>`', inline=False)
-        e9.add_field(name='Common Shortcuts', value='`$b` ban | `$ub` unban | `$hb` hackban | `$uhb` unhackban\n`$k` kick | `$m` mute | `$um` unmute\n`$w` warn | `$ws` warnings | `$cw` clearwarnings\n`$r` role | `$n` nick | `$sm` slowmode\n`$lk` lock | `$ulk` unlock | `$hd` hide | `$uhd` unhide\n`$av` avatar | `$bn` banner | `$ui` userinfo | `$si` serverinfo\n`$ri` roleinfo | `$mc` membercount | `$bi` botinfo\n`$sn` snipe | `$es` editsnipe\n`$ap` adminperms | `$mp` modperms', inline=False)
-        e9.set_footer(text=f'Page 9/{total_pages}')
-        pages.append(e9)
-
+    
+    # PAGE 4 - Moderation
+    e4 = discord.Embed(title='🛡️ moderation commands', description='**requires:** mod role', color=0x5865F2)
+    e4.add_field(name='🔇 mute', value='`$mute` / `$m @user <time> <reason>`\ntime: `10s` `5m` `1h` `1d`\n`$unmute` / `$um @user`', inline=False)
+    e4.add_field(name='⚠️ warn', value='`$warn` / `$w @user <reason>`\n`$warnings` / `$ws @user`\n`$clearwarnings` / `$cw @user`', inline=False)
+    e4.add_field(name='✏️ nickname', value='`$nick` / `$n @user <name>`', inline=False)
+    e4.set_footer(text='page 4/10')
+    pages.append(e4)
+    
+    # PAGE 5 - Admin Actions
+    e5 = discord.Embed(title='🔨 admin commands', description='**requires:** admin role', color=0x5865F2)
+    e5.add_field(name='🚪 ban & kick', value='`$ban` / `$b @user <reason>`\n`$unban` / `$ub <ID>`\n`$hackban` / `$hb <ID> <reason>`\n`$unhackban` / `$uhb <ID>`\n`$kick` / `$k @user <reason>`', inline=False)
+    e5.add_field(name='🎭 role', value='`$role` / `$r @user <rolename>`', inline=False)
+    e5.add_field(name='🔒 channel', value='`$slowmode` / `$sm <seconds>`\n`$lock` / `$lk` - lock channel\n`$unlock` / `$ulk`\n`$hide` / `$hd` - hide channel\n`$unhide` / `$uhd`', inline=False)
+    e5.set_footer(text='page 5/10')
+    pages.append(e5)
+    
+    # PAGE 6 - Permission Setup
+    e6 = discord.Embed(title='👑 permission setup', description='**requires:** administrator', color=0x5865F2)
+    e6.add_field(name='admin role', value='`$adminperms set @role` / `$ap set`\n`$adminperms show` / `$ap show`\n\ngives access to ban, kick, role, slowmode, lock, hide, purge', inline=False)
+    e6.add_field(name='mod role', value='`$modperms set @role` / `$mp set`\n`$modperms show` / `$mp show`\n\ngives access to mute, warn, nick', inline=False)
+    e6.set_footer(text='page 6/10')
+    pages.append(e6)
+    
+    # PAGE 7 - Anti-Systems
+    e7 = discord.Embed(title='🛡️ protection systems', description='**requires:** owner', color=0x5865F2)
+    e7.add_field(name='anti-nuke', value='`$anti-nuke enable/disable/status`\n`$anti-nuke whitelist @role`\n`$anti-nuke unwhitelist @role`\n\nprotects: mass bans, kicks, deletes, bots, webhooks', inline=False)
+    e7.add_field(name='anti-raid', value='`$anti-raid enable/disable/status`\n`$anti-raid action <kick/ban>`\n`$anti-raid accountage <days>`\n`$anti-raid avatar <on/off>`\n\nprotects: join spam, new accounts, no avatars', inline=False)
+    e7.set_footer(text='page 7/10')
+    pages.append(e7)
+    
+    # PAGE 8 - More Anti-Systems
+    e8 = discord.Embed(title='🛡️ more protection', description='**requires:** owner', color=0x5865F2)
+    e8.add_field(name='anti-spam', value='`$anti-spam enable/disable/status`\n`$anti-spam whitelist @role`\n\ndetects: 7+ msgs in 10s, escalating timeouts', inline=False)
+    e8.add_field(name='anti-link', value='`$anti-link enable/disable/status`\n`$anti-link role @role` - allow links\n`$anti-link unrole @role`\n\nblocks all links unless whitelisted', inline=False)
+    e8.add_field(name='anti-react', value='`$anti-react enable/disable/status`\n`$anti-react action <warn/timeout/kick>`\n\ndetects: 10+ reacts in 10s across 5+ msgs', inline=False)
+    e8.set_footer(text='page 8/10')
+    pages.append(e8)
+    
+    # PAGE 9 - AutoMod & Giveaways
+    e9 = discord.Embed(title='🤖 automod & giveaways', color=0x5865F2)
+    e9.add_field(name='🤖 automod', value='**requires:** owner\n`$automod enable/disable/status`\n`$automod add <word>` - add bad word\n`$automod remove <word>`\n`$automod list` - view filter\n\nfilters bad words, staff bypass', inline=False)
+    e9.add_field(name='🎉 giveaways', value='**requires:** manage server\n`$giveaway start <time> <winners> <prize>`\n`$g start 1h 3 nitro` - example\n`$giveaway end <msg_id>`\n`$giveaway reroll <msg_id>`\n`$giveaway list`', inline=False)
+    e9.set_footer(text='page 9/10')
+    pages.append(e9)
+    
+    # PAGE 10 - Owner Advanced
+    e10 = discord.Embed(title='⚡ shortcuts & advanced', description='**requires:** owner for advanced', color=0x5865F2)
+    e10.add_field(name='🔐 advanced', value='`$lockdown` - lock all channels\n`$unlockdown`\n`$channelperm #ch @target enable/disable <perm>`\n`$channelpermall @target enable/disable <perm>`', inline=False)
+    e10.add_field(name='⚡ shortcuts', value='`$b` ban | `$k` kick | `$m` mute | `$w` warn\n`$av` avatar | `$ui` userinfo | `$si` serverinfo\n`$sn` snipe | `$es` editsnipe\n`$ap` adminperms | `$mp` modperms\n\nand many more...', inline=False)
+    e10.set_footer(text='page 10/10')
+    pages.append(e10)
+    
     view = HelpView(pages, ctx.author.id)
+    await ctx.reply(embed=pages[0], view=view)
     await ctx.reply(embed=pages[0], view=view)
 
 # ==================== EVENTS ====================
@@ -2200,7 +2359,7 @@ async def on_message(message):
             logger.error(f'Ticket filter error: {e}')
 
     # Anti-spam
-    if not anti_spam.is_whitelisted(message.guild.id, message.author):
+    if not anti_spam.is_whitelisted(message.author):
         anti_spam.add_message(message.guild.id, message.author.id)
         if anti_spam.is_spam(message.guild.id, message.author.id):
             try:
@@ -3003,3 +3162,67 @@ async def automod_status(ctx):
     embed.add_field(name='words', value=str(words))
     embed.add_field(name='staff bypass', value='yes', inline=False)
     await ctx.reply(embed=embed)
+
+# ERROR HANDLERS - Show permission denied messages
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Handle command errors with friendly messages"""
+    
+    # Ignore command not found
+    if isinstance(error, commands.CommandNotFound):
+        return
+    
+    # Missing permissions (Discord permissions)
+    if isinstance(error, commands.MissingPermissions):
+        perms = ', '.join(error.missing_permissions).replace('_', ' ')
+        return await ctx.reply(f'❌ you need **{perms}** permission to use this')
+    
+    # Bot missing permissions
+    if isinstance(error, commands.BotMissingPermissions):
+        perms = ', '.join(error.missing_permissions).replace('_', ' ')
+        return await ctx.reply(f'❌ i need **{perms}** permission to do that')
+    
+    # Check failure (our custom decorators: @is_owner, @is_admin, @is_mod)
+    if isinstance(error, commands.CheckFailure):
+        # Try to determine which check failed
+        if 'is_owner' in str(error) or ctx.command.name in ['anti-nuke', 'anti-raid', 'anti-spam', 'anti-link', 'anti-react', 'automod', 'lockdown', 'unlockdown', 'channelperm', 'channelpermall']:
+            return await ctx.reply('❌ owner only command')
+        elif 'is_admin' in str(error) or ctx.command.name in ['ban', 'unban', 'hackban', 'unhackban', 'kick', 'role', 'slowmode', 'lock', 'unlock', 'hide', 'unhide', 'purge', 'adminperms']:
+            return await ctx.reply('❌ admin role required\n\nset admin role: `$adminperms set @role`')
+        elif 'is_mod' in str(error) or ctx.command.name in ['mute', 'unmute', 'warn', 'warnings', 'clearwarnings', 'nick']:
+            return await ctx.reply('❌ mod role required\n\nset mod role: `$modperms set @role`')
+        else:
+            return await ctx.reply('❌ you dont have permission to use this')
+    
+    # Missing required argument
+    if isinstance(error, commands.MissingRequiredArgument):
+        return await ctx.reply(f'❌ missing argument: **{error.param.name}**\n\ncheck `$help` for usage')
+    
+    # Bad argument (wrong type)
+    if isinstance(error, commands.BadArgument):
+        return await ctx.reply(f'❌ invalid argument\n\ncheck `$help` for usage')
+    
+    # User not found
+    if isinstance(error, commands.UserNotFound):
+        return await ctx.reply(f'❌ user not found')
+    
+    # Member not found
+    if isinstance(error, commands.MemberNotFound):
+        return await ctx.reply(f'❌ member not found')
+    
+    # Channel not found
+    if isinstance(error, commands.ChannelNotFound):
+        return await ctx.reply(f'❌ channel not found')
+    
+    # Role not found
+    if isinstance(error, commands.RoleNotFound):
+        return await ctx.reply(f'❌ role not found')
+    
+    # On cooldown
+    if isinstance(error, commands.CommandOnCooldown):
+        return await ctx.reply(f'❌ slow down bro, try again in {error.retry_after:.1f}s')
+    
+    # Other errors - log them
+    logger.error(f'Command error in {ctx.command}: {error}')
+    # Don't send error message for unknown errors
