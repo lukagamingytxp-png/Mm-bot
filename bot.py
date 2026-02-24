@@ -466,6 +466,18 @@ giveaway = GiveawaySystem()
 
 # GIVEAWAY COMMANDS
 
+intents = discord.Intents.default()
+
+intents.message_content = True
+
+intents.members = True
+
+intents.guilds = True
+
+intents.bans = True
+
+intents.integrations = True
+
 bot = commands.Bot(command_prefix='$', intents=intents, help_command=None)
 
 async def generate_ticket_id():
@@ -3242,9 +3254,28 @@ class Database:
 
 db = Database()
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.guilds = True
-intents.bans = True
-intents.integrations = True
+
+# ==================== BOT STARTUP ====================
+
+@bot.event
+async def on_ready():
+    """Bot startup"""
+    try:
+        await db.connect()
+        logger.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
+        logger.info(f'Connected to {len(bot.guilds)} guilds')
+        await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name='$help'))
+    except Exception as e:
+        logger.error(f'Error in on_ready: {e}')
+
+# ==================== RUN BOT ====================
+
+if __name__ == '__main__':
+    BOT_TOKEN = os.getenv('BOT_TOKEN')
+    if not BOT_TOKEN:
+        raise Exception("BOT_TOKEN environment variable not set")
+    
+    try:
+        bot.run(BOT_TOKEN)
+    except Exception as e:
+        logger.error(f'Failed to start bot: {e}')
