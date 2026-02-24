@@ -466,130 +466,6 @@ giveaway = GiveawaySystem()
 
 # GIVEAWAY COMMANDS
 
-@bot.group(name='giveaway', aliases=['g'], invoke_without_command=True)
-async def giveaway_group(ctx):
-    embed = discord.Embed(title='🎉 giveaway system', color=COLORS['support'])
-    embed.add_field(name='create', value='`$giveaway start <time> <winners> <prize>`\nExample: `$g start 1h 3 Nitro`')
-    embed.add_field(name='manage', value='`$giveaway end <message_id>`\n`$giveaway reroll <message_id>`')
-    await ctx.reply(embed=embed)
-
-@giveaway_group.command(name='start', aliases=['create'])
-@commands.has_permissions(manage_guild=True)
-async def giveaway_start(ctx, duration: str, winners: int, *, prize: str):
-    """Start a giveaway
-    Example: $giveaway start 1h 3 Discord Nitro"""
-    
-    if winners < 1 or winners > 20:
-        return await ctx.reply('❌ winners must be 1-20')
-    
-    try:
-        # Parse duration
-        dur = parse_duration(duration)
-        if not dur:
-            return await ctx.reply('❌ invalid duration\n\nExamples: 1h, 30m, 1d, 2h30m')
-        
-        if dur.total_seconds() < 60:
-            return await ctx.reply('❌ giveaway must be at least 1 minute')
-        
-        if dur.total_seconds() > 604800:  # 7 days
-            return await ctx.reply('❌ giveaway cant be longer than 7 days')
-        
-        await ctx.message.delete()
-        giveaway_id = await giveaway.create_giveaway(ctx, dur, winners, prize)
-        
-        logger.info(f'GIVEAWAY: {ctx.author} started giveaway for {prize}')
-        
-        # Schedule auto-end
-        async def auto_end():
-            await asyncio.sleep(dur.total_seconds())
-            await giveaway.end_giveaway(bot, giveaway_id)
-        
-        bot.loop.create_task(auto_end())
-        
-    except Exception as e:
-        await ctx.reply(f'❌ error: {e}')
-
-@giveaway_group.command(name='end')
-@commands.has_permissions(manage_guild=True)
-async def giveaway_end(ctx, message_id: int):
-    """End a giveaway early"""
-    winners, error = await giveaway.end_giveaway(bot, message_id)
-    
-    if error:
-        return await ctx.reply(f'❌ {error}')
-    
-    await ctx.reply(f'✅ giveaway ended - {len(winners)} winner(s) picked')
-
-@giveaway_group.command(name='reroll')
-@commands.has_permissions(manage_guild=True)
-async def giveaway_reroll(ctx, message_id: int):
-    """Reroll giveaway winners"""
-    winners, error = await giveaway.end_giveaway(bot, message_id, reroll=True)
-    
-    if error:
-        return await ctx.reply(f'❌ {error}')
-    
-    winner_mentions = ' '.join([w.mention for w in winners])
-    await ctx.send(f'🎉 **REROLL** - New winner(s): {winner_mentions}!')
-
-@giveaway_group.command(name='list')
-async def giveaway_list(ctx):
-    """List active giveaways"""
-    active = [g for g in giveaway.active_giveaways.values() if not g['ended'] and g['guild_id'] == ctx.guild.id]
-    
-    if not active:
-        return await ctx.reply('no active giveaways')
-    
-    embed = discord.Embed(title='🎉 active giveaways', color=COLORS['support'])
-    for g in active[:10]:
-        channel = ctx.guild.get_channel(g['channel_id'])
-        embed.add_field(
-            name=g['prize'],
-            value=f"Channel: {channel.mention}\nEnds: <t:{int(g['end_time'].timestamp())}:R>\nWinners: {g['winners']}",
-            inline=False
-        )
-    
-    await ctx.reply(embed=embed)
-
-class Lockdown:
-    def __init__(self):
-        self.locked_channels = defaultdict(list)
-    def is_locked(self, guild_id):
-        return len(self.locked_channels.get(guild_id, [])) > 0
-
-lockdown = Lockdown()
-
-class Database:
-    def __init__(self):
-        self.pool = None
-    async def connect(self):
-        database_url = os.getenv('DATABASE_URL')
-        if not database_url:
-            raise Exception("DATABASE_URL not set")
-        if database_url.startswith('postgres://'):
-            database_url = database_url.replace('postgres://', 'postgresql://', 1)
-        self.pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10)
-        await self.create_tables()
-    async def create_tables(self):
-        async with self.pool.acquire() as conn:
-            await conn.execute('CREATE TABLE IF NOT EXISTS config (guild_id BIGINT PRIMARY KEY, ticket_category_id BIGINT, log_channel_id BIGINT)')
-            await conn.execute('CREATE TABLE IF NOT EXISTS tickets (ticket_id TEXT PRIMARY KEY, guild_id BIGINT, channel_id BIGINT, user_id BIGINT, ticket_type TEXT, tier TEXT, claimed_by BIGINT, status TEXT DEFAULT \'open\', trade_details JSONB, created_at TIMESTAMP DEFAULT NOW())')
-            await conn.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id BIGINT PRIMARY KEY, guild_id BIGINT, reason TEXT, blacklisted_by BIGINT)')
-            await conn.execute('CREATE TABLE IF NOT EXISTS ps_links (user_id BIGINT, game_key TEXT, game_name TEXT, link TEXT, PRIMARY KEY (user_id, game_key))')
-            await conn.execute('CREATE TABLE IF NOT EXISTS jailed_users (user_id BIGINT PRIMARY KEY, guild_id BIGINT, saved_roles JSONB, reason TEXT, jailed_by BIGINT, jailed_at TIMESTAMP DEFAULT NOW())')
-            await conn.execute('CREATE TABLE IF NOT EXISTS warnings (id SERIAL PRIMARY KEY, guild_id BIGINT, user_id BIGINT, reason TEXT, warned_by BIGINT, warned_at TIMESTAMP DEFAULT NOW())')
-    async def close(self):
-        if self.pool:
-            await self.pool.close()
-
-db = Database()
-
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.guilds = True
-intents.bans = True
-intents.integrations = True
 bot = commands.Bot(command_prefix='$', intents=intents, help_command=None)
 
 async def generate_ticket_id():
@@ -655,6 +531,27 @@ def parse_duration(duration_str):
         return None
     amount, unit = int(match.group(1)), match.group(2)
     return timedelta(seconds=amount * units[unit])
+
+
+async def send_log(guild, title, description=None, color=0x5865F2, fields=None, user=None):
+    """Send log to log channel"""
+    try:
+        async with db.pool.acquire() as conn:
+            config = await conn.fetchrow('SELECT log_channel_id FROM config WHERE guild_id = $1', guild.id)
+            if config and config['log_channel_id']:
+                log_channel = guild.get_channel(config['log_channel_id'])
+                if log_channel:
+                    embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
+                    if description:
+                        embed.description = description
+                    if user:
+                        embed.set_author(name=str(user), icon_url=user.display_avatar.url)
+                    if fields:
+                        for name, value in fields.items():
+                            embed.add_field(name=name, value=str(value), inline=True)
+                    await log_channel.send(embed=embed)
+    except Exception as e:
+        logger.error(f'log error: {e}')
 
 class MiddlemanModal(Modal, title='Middleman Request'):
     def __init__(self, tier):
@@ -3226,3 +3123,128 @@ async def on_command_error(ctx, error):
     # Other errors - log them
     logger.error(f'Command error in {ctx.command}: {error}')
     # Don't send error message for unknown errors
+
+@bot.group(name='giveaway', aliases=['g'], invoke_without_command=True)
+async def giveaway_group(ctx):
+    embed = discord.Embed(title='🎉 giveaway system', color=COLORS['support'])
+    embed.add_field(name='create', value='`$giveaway start <time> <winners> <prize>`\nExample: `$g start 1h 3 Nitro`')
+    embed.add_field(name='manage', value='`$giveaway end <message_id>`\n`$giveaway reroll <message_id>`')
+    await ctx.reply(embed=embed)
+
+@giveaway_group.command(name='start', aliases=['create'])
+@commands.has_permissions(manage_guild=True)
+async def giveaway_start(ctx, duration: str, winners: int, *, prize: str):
+    """Start a giveaway
+    Example: $giveaway start 1h 3 Discord Nitro"""
+    
+    if winners < 1 or winners > 20:
+        return await ctx.reply('❌ winners must be 1-20')
+    
+    try:
+        # Parse duration
+        dur = parse_duration(duration)
+        if not dur:
+            return await ctx.reply('❌ invalid duration\n\nExamples: 1h, 30m, 1d, 2h30m')
+        
+        if dur.total_seconds() < 60:
+            return await ctx.reply('❌ giveaway must be at least 1 minute')
+        
+        if dur.total_seconds() > 604800:  # 7 days
+            return await ctx.reply('❌ giveaway cant be longer than 7 days')
+        
+        await ctx.message.delete()
+        giveaway_id = await giveaway.create_giveaway(ctx, dur, winners, prize)
+        
+        logger.info(f'GIVEAWAY: {ctx.author} started giveaway for {prize}')
+        
+        # Schedule auto-end
+        async def auto_end():
+            await asyncio.sleep(dur.total_seconds())
+            await giveaway.end_giveaway(bot, giveaway_id)
+        
+        bot.loop.create_task(auto_end())
+        
+    except Exception as e:
+        await ctx.reply(f'❌ error: {e}')
+
+@giveaway_group.command(name='end')
+@commands.has_permissions(manage_guild=True)
+async def giveaway_end(ctx, message_id: int):
+    """End a giveaway early"""
+    winners, error = await giveaway.end_giveaway(bot, message_id)
+    
+    if error:
+        return await ctx.reply(f'❌ {error}')
+    
+    await ctx.reply(f'✅ giveaway ended - {len(winners)} winner(s) picked')
+
+@giveaway_group.command(name='reroll')
+@commands.has_permissions(manage_guild=True)
+async def giveaway_reroll(ctx, message_id: int):
+    """Reroll giveaway winners"""
+    winners, error = await giveaway.end_giveaway(bot, message_id, reroll=True)
+    
+    if error:
+        return await ctx.reply(f'❌ {error}')
+    
+    winner_mentions = ' '.join([w.mention for w in winners])
+    await ctx.send(f'🎉 **REROLL** - New winner(s): {winner_mentions}!')
+
+@giveaway_group.command(name='list')
+async def giveaway_list(ctx):
+    """List active giveaways"""
+    active = [g for g in giveaway.active_giveaways.values() if not g['ended'] and g['guild_id'] == ctx.guild.id]
+    
+    if not active:
+        return await ctx.reply('no active giveaways')
+    
+    embed = discord.Embed(title='🎉 active giveaways', color=COLORS['support'])
+    for g in active[:10]:
+        channel = ctx.guild.get_channel(g['channel_id'])
+        embed.add_field(
+            name=g['prize'],
+            value=f"Channel: {channel.mention}\nEnds: <t:{int(g['end_time'].timestamp())}:R>\nWinners: {g['winners']}",
+            inline=False
+        )
+    
+    await ctx.reply(embed=embed)
+
+class Lockdown:
+    def __init__(self):
+        self.locked_channels = defaultdict(list)
+    def is_locked(self, guild_id):
+        return len(self.locked_channels.get(guild_id, [])) > 0
+
+lockdown = Lockdown()
+
+class Database:
+    def __init__(self):
+        self.pool = None
+    async def connect(self):
+        database_url = os.getenv('DATABASE_URL')
+        if not database_url:
+            raise Exception("DATABASE_URL not set")
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql://', 1)
+        self.pool = await asyncpg.create_pool(database_url, min_size=1, max_size=10)
+        await self.create_tables()
+    async def create_tables(self):
+        async with self.pool.acquire() as conn:
+            await conn.execute('CREATE TABLE IF NOT EXISTS config (guild_id BIGINT PRIMARY KEY, ticket_category_id BIGINT, log_channel_id BIGINT)')
+            await conn.execute('CREATE TABLE IF NOT EXISTS tickets (ticket_id TEXT PRIMARY KEY, guild_id BIGINT, channel_id BIGINT, user_id BIGINT, ticket_type TEXT, tier TEXT, claimed_by BIGINT, status TEXT DEFAULT \'open\', trade_details JSONB, created_at TIMESTAMP DEFAULT NOW())')
+            await conn.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id BIGINT PRIMARY KEY, guild_id BIGINT, reason TEXT, blacklisted_by BIGINT)')
+            await conn.execute('CREATE TABLE IF NOT EXISTS ps_links (user_id BIGINT, game_key TEXT, game_name TEXT, link TEXT, PRIMARY KEY (user_id, game_key))')
+            await conn.execute('CREATE TABLE IF NOT EXISTS jailed_users (user_id BIGINT PRIMARY KEY, guild_id BIGINT, saved_roles JSONB, reason TEXT, jailed_by BIGINT, jailed_at TIMESTAMP DEFAULT NOW())')
+            await conn.execute('CREATE TABLE IF NOT EXISTS warnings (id SERIAL PRIMARY KEY, guild_id BIGINT, user_id BIGINT, reason TEXT, warned_by BIGINT, warned_at TIMESTAMP DEFAULT NOW())')
+    async def close(self):
+        if self.pool:
+            await self.pool.close()
+
+db = Database()
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.guilds = True
+intents.bans = True
+intents.integrations = True
