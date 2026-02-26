@@ -1472,31 +1472,6 @@ async def help_command(ctx):
     embed.set_footer(text='all logged | dropdown: 100-900, 1K-2K, 2K-5K RBX | staff can talk in locks')
     await ctx.reply(embed=embed)
 
-# ==================== RUN BOT ====================
-
-if __name__ == '__main__':
-    BOT_TOKEN = os.getenv('BOT_TOKEN')
-    if not BOT_TOKEN:
-        raise Exception("BOT_TOKEN not set")
-    bot.run(BOT_TOKEN)
-
-# Add on_member_remove event after on_message_edit
-@bot.event
-async def on_member_remove(member):
-    # Leave message
-    if member.guild.id in leave_messages:
-        leave_data = leave_messages[member.guild.id]
-        channel = member.guild.get_channel(leave_data['channel_id'])
-        if channel:
-            try:
-                message = leave_data['message']
-                message = message.replace('{user}', str(member))
-                message = message.replace('{server}', member.guild.name)
-                message = message.replace('{membercount}', str(member.guild.member_count))
-                await channel.send(message)
-            except:
-                pass
-
 # ==================== ADDITIONAL ADMIN COMMANDS ====================
 
 @bot.command(name='unban', aliases=['ub'])
@@ -1886,3 +1861,27 @@ async def unlockdown_server(ctx):
     await msg.edit(content=f'🔓 unlocked {unlocked} channels')
     await send_log(ctx.guild, '🔓 UNLOCKDOWN', f'{ctx.author.mention} unlocked all channels', COLORS['success'], {'Unlocked': unlocked})
 
+# ==================== RUN BOT ====================
+
+if __name__ == '__main__':
+    BOT_TOKEN = os.getenv('BOT_TOKEN')
+    if not BOT_TOKEN:
+        raise Exception("BOT_TOKEN not set")
+    bot.run(BOT_TOKEN)
+
+# Add on_member_remove event after on_message_edit
+@bot.event
+async def on_member_remove(member):
+    # Leave message
+    if member.guild.id in leave_messages:
+        leave_data = leave_messages[member.guild.id]
+        channel = member.guild.get_channel(leave_data['channel_id'])
+        if channel:
+            try:
+                message = leave_data['message']
+                message = message.replace('{user}', str(member))
+                message = message.replace('{server}', member.guild.name)
+                message = message.replace('{membercount}', str(member.guild.member_count))
+                await channel.send(message)
+            except:
+                pass
