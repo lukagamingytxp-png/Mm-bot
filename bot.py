@@ -837,16 +837,20 @@ async def proof_cmd(ctx):
 @owner_only()
 async def setup_cmd(ctx):
     e = discord.Embed(color=TIER_COLOR['support'])
-    e.set_author(name='Ticket Center')
+    e.set_author(name="Trial's Cross Trade  —  Middleman Service")
     e.description = (
-        'Support\n'
-        'general help, questions, issues\n\n'
-        'Middleman\n'
-        'secure assisted trading\n'
-        'three tiers based on trade value\n'
-        'handled by verified staff'
+        '🛠️ **Support**\n'
+        '• General help & questions\n'
+        '• Report a scammer or issue\n'
+        '• Partnership requests\n'
+        '• Anything else\n\n'
+        '⚖️ **Middleman**\n'
+        '• Secure & verified trading\n'
+        '• 3 tiers based on trade value\n'
+        '• Every trade handled by trusted staff\n'
+        '• Full protection from start to finish'
     )
-    e.set_footer(text='pick a category below')
+    e.set_footer(text="Trial's Cross Trade  •  pick a category below")
     await ctx.send(embed=e, view=TicketPanel())
     try:
         await ctx.message.delete()
@@ -858,18 +862,21 @@ async def setup_cmd(ctx):
 @owner_only()
 async def setuprewards_cmd(ctx):
     e = discord.Embed(color=TIER_COLOR['reward'])
-    e.set_author(name='Claim Center')
+    e.set_author(name="Trial's Cross Trade  —  Reward Claims")
     e.description = (
-        'Giveaway Prizes\n'
-        'won a giveaway and need your prize\n\n'
-        'Invite Rewards\n'
-        'hit an invite milestone\n\n'
-        'Event Rewards\n'
-        'won something from a server event\n\n'
-        'Other\n'
-        'anything else reward related'
+        '🎉 **Giveaway Prizes**\n'
+        '• Won a giveaway? claim your prize here\n\n'
+        '📨 **Invite Rewards**\n'
+        '• Hit an invite milestone? grab your reward\n\n'
+        '🏆 **Event Rewards**\n'
+        '• Placed or won in a server event\n\n'
+        '💰 **Bonus Rewards**\n'
+        '• Activity bonuses & special rewards\n\n'
+        '🎁 **Other**\n'
+        '• Anything else reward related\n\n'
+        '*make sure you have proof ready before opening — it speeds things up*'
     )
-    e.set_footer(text='click below to open a claim ticket')
+    e.set_footer(text="Trial's Cross Trade  •  click below to claim")
     await ctx.send(embed=e, view=RewardPanel())
     try:
         await ctx.message.delete()
