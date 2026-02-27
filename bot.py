@@ -15,9 +15,9 @@ from typing import Optional
 from collections import defaultdict
 
 import discord
-from discord import TextInput, Modal, ButtonStyle
+from discord import ButtonStyle
+from discord.ui import View, Select, Modal, TextInput
 from discord.ext import commands
-from discord.ui import View, Select
 import asyncpg
 import aiohttp
 
