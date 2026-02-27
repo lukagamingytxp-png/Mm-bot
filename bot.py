@@ -549,15 +549,16 @@ lockdown = Lockdown()
 
 class GiveawaySystem:
     def __init__(self):
-        self.active: dict = {}  # message_id -> giveaway_data
+        self.active: dict = {}          # message_id -> giveaway_data
+        self.last_winners: dict = {}    # giveaway_id -> set of user_ids who won last draw
 
     async def create(self, ctx: commands.Context, duration: timedelta, winners: int, prize: str) -> int:
         end_time = datetime.now(timezone.utc) + duration
         embed = discord.Embed(title='🎉 GIVEAWAY 🎉', color=0xF1C40F)
-        embed.add_field(name='Prize',       value=prize,                                    inline=False)
-        embed.add_field(name='Winners',     value=str(winners),                             inline=True)
-        embed.add_field(name='Ends',        value=f'<t:{int(end_time.timestamp())}:R>',     inline=True)
-        embed.add_field(name='How to Enter', value='React with 🎉',                        inline=False)
+        embed.add_field(name='Prize',        value=prize,                                inline=False)
+        embed.add_field(name='Winners',      value=str(winners),                         inline=True)
+        embed.add_field(name='Ends',         value=f'<t:{int(end_time.timestamp())}:R>', inline=True)
+        embed.add_field(name='How to Enter', value='React with 🎉',                     inline=False)
         embed.set_footer(text=f'Hosted by {ctx.author.display_name}')
         msg = await ctx.send(embed=embed)
         await msg.add_reaction('🎉')
@@ -584,11 +585,20 @@ class GiveawaySystem:
             reaction = next((r for r in message.reactions if str(r.emoji) == '🎉'), None)
             if not reaction:
                 return None, 'No entries found'
+            # Get all entrants, shuffle them properly
             users = [u async for u in reaction.users() if not u.bot]
             if not users:
                 return None, 'No valid entries'
-            count   = min(data['winners'], len(users))
-            winners = random.sample(users, count)
+            random.shuffle(users)
+            # Filter out last winners to prevent back-to-back wins (if enough people)
+            last = self.last_winners.get(giveaway_id, set())
+            eligible = [u for u in users if u.id not in last]
+            # Fall back to everyone if not enough eligible
+            pool = eligible if len(eligible) >= data['winners'] else users
+            count   = min(data['winners'], len(pool))
+            winners = random.sample(pool, count)
+            # Track these winners so they can't win back-to-back
+            self.last_winners[giveaway_id] = {w.id for w in winners}
             mentions = ' '.join(w.mention for w in winners)
             embed = discord.Embed(title='🎉 GIVEAWAY ENDED 🎉', color=0x2ECC71)
             embed.add_field(name='Prize',   value=data['prize'], inline=False)
@@ -724,8 +734,6 @@ def has_admin_perms():
     async def predicate(ctx):
         if ctx.author.id == OWNER_ID:
             return True
-        if ctx.author.guild_permissions.administrator:
-            return True
         role_id = admin_perms.get(ctx.guild.id)
         if not role_id:
             return False
@@ -736,8 +744,6 @@ def has_admin_perms():
 def has_mod_perms():
     async def predicate(ctx):
         if ctx.author.id == OWNER_ID:
-            return True
-        if ctx.author.guild_permissions.administrator:
             return True
         admin_id = admin_perms.get(ctx.guild.id)
         if admin_id:
@@ -2728,7 +2734,7 @@ async def ping_cmd(ctx):
 
 
 @bot.command(name='say')
-@has_admin_perms()
+@is_owner()
 async def say_cmd(ctx, channel: discord.TextChannel = None, *, message: str = None):
     """Send a plain message as the bot to a channel"""
     if not message:
@@ -2741,7 +2747,7 @@ async def say_cmd(ctx, channel: discord.TextChannel = None, *, message: str = No
 
 
 @bot.command(name='embedsay', aliases=['esay'])
-@has_admin_perms()
+@is_owner()
 async def embedsay_cmd(ctx, channel: discord.TextChannel = None, *, text: str = None):
     """Send a formatted embed as the bot. Format: title | description | color(hex optional)"""
     if not text:
@@ -2975,8 +2981,21 @@ async def on_message(message: discord.Message):
 
     author = message.author
 
+    # --- Admin bypass: skip all anti-systems for admin role and above (anti-nuke still applies separately via events) ---
+    def _is_admin_or_above(member: discord.Member) -> bool:
+        if member.id == OWNER_ID: return True
+        if member.guild_permissions.administrator: return True
+        admin_id = admin_perms.get(member.guild.id)
+        if admin_id:
+            admin_role = member.guild.get_role(admin_id)
+            if admin_role and any(r >= admin_role for r in member.roles):
+                return True
+        return False
+
+    author_is_admin = _is_admin_or_above(author)
+
     # --- AutoMod bad-word filter (runs first, returns early) ---
-    if automod.enabled.get(message.guild.id):
+    if not author_is_admin and automod.enabled.get(message.guild.id):
         has_bad, _ = automod.check_message(message)
         if has_bad:
             try:
@@ -3013,7 +3032,7 @@ async def on_message(message: discord.Message):
             except: pass
 
     # --- Anti-emoji ---
-    if anti_emoji.enabled.get(message.guild.id) and not anti_emoji.is_whitelisted(author):
+    if not author_is_admin and anti_emoji.enabled.get(message.guild.id) and not anti_emoji.is_whitelisted(author):
         if anti_emoji.is_emoji_spam(message.guild.id, message.content):
             try:
                 await message.delete()
@@ -3022,7 +3041,7 @@ async def on_message(message: discord.Message):
             return
 
     # --- Anti-caps ---
-    if anti_caps.enabled.get(message.guild.id) and not anti_caps.is_whitelisted(author):
+    if not author_is_admin and anti_caps.enabled.get(message.guild.id) and not anti_caps.is_whitelisted(author):
         if anti_caps.is_caps_spam(message.guild.id, message.content):
             try:
                 await message.delete()
@@ -3033,7 +3052,7 @@ async def on_message(message: discord.Message):
             return
 
     # --- Anti-duplicate ---
-    if anti_duplicate.enabled.get(message.guild.id) and not anti_duplicate.is_whitelisted(author):
+    if not author_is_admin and anti_duplicate.enabled.get(message.guild.id) and not anti_duplicate.is_whitelisted(author):
         if anti_duplicate.check(message.guild.id, author.id, message.content):
             try:
                 await message.delete()
@@ -3051,7 +3070,7 @@ async def on_message(message: discord.Message):
                 claimed = ticket.get('claimed_by')
 
                 if not claimed:
-                    # Unclaimed: creator + tier/staff role can talk, nobody else
+                    # Unclaimed: only staff/tier role can talk — creator cannot
                     has_role_perm = False
                     if ticket['ticket_type'] == 'support':
                         staff_role = message.guild.get_role(HARDCODED_ROLES['staff'])
@@ -3061,27 +3080,29 @@ async def on_message(message: discord.Message):
                         tier_role = message.guild.get_role(HARDCODED_ROLES.get(ticket.get('tier', '')))
                         if tier_role and tier_role in author.roles:
                             has_role_perm = True
-                    if not has_role_perm and author.id != ticket['user_id']:
+                    if not has_role_perm:
                         try:
                             await message.delete()
-                            await message.channel.send(f'{author.mention} wait for staff to claim this ticket', delete_after=3)
+                            if author.id == ticket['user_id']:
+                                await message.channel.send(f'{author.mention} wait for a staff member to claim your ticket before talking', delete_after=4)
+                            else:
+                                await message.channel.send(f'{author.mention} you cannot talk in this ticket', delete_after=3)
                         except: pass
                         return
                 else:
-                    # Claimed: ONLY creator, claimer, and $add'd users (explicit overwrite) — tier role no longer enough
-                    allowed_ids = [ticket['user_id'], claimed]
+                    # Claimed: ONLY claimer and explicitly $add'd users — creator still cannot talk unless added
                     ow = message.channel.overwrites_for(author)
-                    if author.id not in allowed_ids and ow.send_messages is not True:
+                    if author.id != claimed and ow.send_messages is not True:
                         try:
                             await message.delete()
-                            await message.channel.send(f'{author.mention} this ticket is claimed — only the creator, claimer and added users can talk', delete_after=4)
+                            await message.channel.send(f'{author.mention} only the claimer and added users can talk in this ticket', delete_after=4)
                         except: pass
                         return
         except Exception as e:
             logger.error(f'Ticket filter: {e}')
 
     # --- Anti-invite (before anti-link to give specific message) ---
-    if anti_invite.enabled.get(message.guild.id) and not anti_invite.is_whitelisted(author):
+    if not author_is_admin and anti_invite.enabled.get(message.guild.id) and not anti_invite.is_whitelisted(author):
         if anti_invite.is_invite(message.content):
             try:
                 await message.delete()
@@ -3092,7 +3113,7 @@ async def on_message(message: discord.Message):
             return
 
     # --- Anti-link ---
-    if anti_link.enabled.get(message.guild.id) and not anti_link.is_whitelisted(author):
+    if not author_is_admin and anti_link.enabled.get(message.guild.id) and not anti_link.is_whitelisted(author):
         if anti_link.is_link(message.content) and not anti_link.is_url_whitelisted(message.guild.id, message.content):
             try:
                 await message.delete()
@@ -3103,7 +3124,7 @@ async def on_message(message: discord.Message):
             return
 
     # --- Anti-spam ---
-    if anti_spam.enabled.get(message.guild.id) and not anti_spam.is_whitelisted(author):
+    if not author_is_admin and anti_spam.enabled.get(message.guild.id) and not anti_spam.is_whitelisted(author):
         anti_spam.add_message(message.guild.id, author.id)
         if anti_spam.is_spam(message.guild.id, author.id):
             try:
@@ -3302,6 +3323,12 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if not guild or not anti_react.enabled.get(guild.id): return
     member = guild.get_member(payload.user_id)
     if not member or member.bot or anti_react.is_whitelisted(member): return
+    # Admin role and above bypass anti-react
+    admin_id = admin_perms.get(guild.id)
+    if member.guild_permissions.administrator: return
+    if admin_id:
+        admin_role = guild.get_role(admin_id)
+        if admin_role and any(r >= admin_role for r in member.roles): return
     anti_react.add_reaction(guild.id, member.id, payload.message_id)
     if not anti_react.is_react_spam(guild.id, member.id): return
     action    = anti_react.settings[guild.id]['action']
