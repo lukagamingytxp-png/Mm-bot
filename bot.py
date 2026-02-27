@@ -412,7 +412,7 @@ class RewardModal(Modal, title='Claim a Reward'):
         super().__init__()
         self.rtype  = reward_type
         self.what   = TextInput(label='What are you claiming?',  placeholder='describe the reward',                    required=True)
-        self.proof  = TextInput(label='Proof',                   placeholder='message link, screenshot link, etc.',    style=discord.TextStyle.paragraph, required=True)
+        self.proof  = TextInput(label='Will You Provide Proof?',                   placeholder='Yes/No',    style=discord.TextStyle.paragraph, required=True)
         self.add_item(self.what)
         self.add_item(self.proof)
 
