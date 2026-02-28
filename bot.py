@@ -2,6 +2,8 @@ import os
 import re
 import io
 import json
+import random
+import string
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -25,13 +27,21 @@ logger = logging.getLogger(__name__)
 OWNER_ID = 1029438856069656576
 
 ROLES = {
-    'staff':    1432081794647199895,
-    'lowtier':  1453757017218093239,
-    'midtier':  1434610759140118640,
-    'hightier': 1453757157144137911,
+    'staff':      1432081794647199895,
+    'lowtier':    1453757017218093239,
+    'midtier':    1434610759140118640,
+    'hightier':   1453757157144137911,
+    'unverified': 0,  # set via $setverify
+    'verified':   0,  # set via $setverify
+    'member':     0,  # set via $setverify
 }
 
 PROOF_CHANNEL = 1472695529883435091
+
+# in-memory captcha store: user_id -> code
+captchas: dict = {}
+# verification config: guild_id -> {unverified, verified, member, channel}
+verify_config: dict = {}
 
 TIER_COLOR = {
     'lowtier':  0x57F287,
@@ -412,7 +422,7 @@ class RewardModal(Modal, title='Claim a Reward'):
         super().__init__()
         self.rtype  = reward_type
         self.what   = TextInput(label='What are you claiming?',  placeholder='describe the reward',                    required=True)
-        self.proof  = TextInput(label='Will You Provide Proof?',                   placeholder='Yes/No',    style=discord.TextStyle.paragraph, required=True)
+        self.proof  = TextInput(label='Proof',                   placeholder='message link, screenshot link, etc.',    style=discord.TextStyle.paragraph, required=True)
         self.add_item(self.what)
         self.add_item(self.proof)
 
@@ -1020,7 +1030,151 @@ async def help_cmd(ctx):
     await ctx.reply(embed=e)
 
 
-# ------------------------------------------------------------------ events
+# ================================================================== VERIFICATION
+
+def gen_captcha(length=6) -> str:
+    chars = string.ascii_uppercase + string.digits
+    chars = chars.replace('O', '').replace('0', '').replace('I', '').replace('1', '')
+    return ''.join(random.choices(chars, k=length))
+
+
+class VerifyView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label='Verify', style=ButtonStyle.green, emoji='✅', custom_id='btn_verify')
+    async def verify(self, interaction: discord.Interaction, _):
+        user = interaction.user
+        cfg  = verify_config.get(interaction.guild.id)
+
+        if not cfg:
+            return await interaction.response.send_message(
+                "verification isn't set up yet, ping a staff member", ephemeral=True
+            )
+
+        verified_role = interaction.guild.get_role(cfg['verified'])
+        if verified_role and verified_role in user.roles:
+            return await interaction.response.send_message(
+                "you're already verified", ephemeral=True
+            )
+
+        code = gen_captcha()
+        captchas[user.id] = code
+
+        await interaction.response.send_message(
+            f"your code is **`{code}`**\n\ntype it in this channel to verify",
+            ephemeral=True
+        )
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    cfg = verify_config.get(member.guild.id)
+    if not cfg:
+        return
+    role = member.guild.get_role(cfg['unverified'])
+    if role:
+        try:
+            await member.add_roles(role, reason='joined — awaiting verification')
+        except Exception as ex:
+            logger.error(f'on_member_join: {ex}')
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        await bot.process_commands(message)
+        return
+
+    # captcha check — only if user has a pending code
+    user_id = message.author.id
+    if user_id in captchas and message.guild:
+        cfg = verify_config.get(message.guild.id)
+        if cfg and message.channel.id == cfg.get('channel'):
+            code = captchas[user_id]
+            if message.content.strip().upper() == code:
+                # correct
+                try:
+                    unverified = message.guild.get_role(cfg['unverified'])
+                    verified   = message.guild.get_role(cfg['verified'])
+                    member_r   = message.guild.get_role(cfg['member'])
+                    if unverified and unverified in message.author.roles:
+                        await message.author.remove_roles(unverified, reason='verified')
+                    if verified:
+                        await message.author.add_roles(verified, reason='verified')
+                    if member_r:
+                        await message.author.add_roles(member_r, reason='verified')
+                    captchas.pop(user_id, None)
+                    msg = await message.channel.send(
+                        f"{message.author.mention} you're verified, welcome to the server!",
+                    )
+                    await message.delete()
+                    await asyncio.sleep(4)
+                    await msg.delete()
+                except Exception as ex:
+                    logger.error(f'verify assign: {ex}')
+            else:
+                # wrong
+                new_code = gen_captcha()
+                captchas[user_id] = new_code
+                msg = await message.channel.send(
+                    f"{message.author.mention} wrong code, try again — your new code is **`{new_code}`**",
+                )
+                await message.delete()
+                await asyncio.sleep(6)
+                await msg.delete()
+            return
+
+    await bot.process_commands(message)
+
+
+@bot.command(name='setverify')
+@owner_only()
+async def setverify_cmd(ctx,
+    unverified: discord.Role = None,
+    verified:   discord.Role = None,
+    member:     discord.Role = None,
+    channel:    discord.TextChannel = None
+):
+    if not all([unverified, verified, member, channel]):
+        return await ctx.reply('usage: `$setverify @unverified @verified @member #channel`')
+    verify_config[ctx.guild.id] = {
+        'unverified': unverified.id,
+        'verified':   verified.id,
+        'member':     member.id,
+        'channel':    channel.id,
+    }
+    await ctx.reply(
+        f'verification set up\n'
+        f'unverified role: {unverified.mention}\n'
+        f'verified role: {verified.mention}\n'
+        f'member role: {member.mention}\n'
+        f'channel: {channel.mention}'
+    )
+
+
+@bot.command(name='setupverify')
+@owner_only()
+async def setupverify_cmd(ctx):
+    e = discord.Embed(color=0x57F287)
+    e.set_author(name="Trial's Cross Trade  —  Verification")
+    e.description = (
+        "Welcome to **Trial's Cross Trade!**\n\n"
+        "To get access to the server you need to verify first.\n\n"
+        "• Click the button below\n"
+        "• You'll get a short code sent to you\n"
+        "• Type it in this channel and you're in\n\n"
+        "*this keeps the server safe from bots*"
+    )
+    e.set_footer(text="Trial's Cross Trade  •  click below to get started")
+    await ctx.send(embed=e, view=VerifyView())
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+
+# ================================================================== EVENTS
 
 @bot.event
 async def on_ready():
@@ -1033,6 +1187,7 @@ async def on_ready():
     bot.add_view(TicketPanel())
     bot.add_view(ControlView())
     bot.add_view(RewardPanel())
+    bot.add_view(VerifyView())
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name='tickets'))
     logger.info(f'ready   {len(bot.guilds)} server(s)')
 
