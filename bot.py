@@ -1105,24 +1105,35 @@ async def on_message(message: discord.Message):
                     if member_r:
                         await message.author.add_roles(member_r, reason='verified')
                     captchas.pop(user_id, None)
-                    msg = await message.channel.send(
-                        f"{message.author.mention} you're verified, welcome to the server!",
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass
+                    confirm = await message.channel.send(
+                        f"{message.author.mention} you're verified, welcome to the server!"
                     )
-                    await message.delete()
-                    await asyncio.sleep(4)
-                    await msg.delete()
+                    await asyncio.sleep(3)
+                    try:
+                        await confirm.delete()
+                    except Exception:
+                        pass
                 except Exception as ex:
                     logger.error(f'verify assign: {ex}')
             else:
-                # wrong
                 new_code = gen_captcha()
                 captchas[user_id] = new_code
-                msg = await message.channel.send(
-                    f"{message.author.mention} wrong code, try again — your new code is **`{new_code}`**",
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                wrong_msg = await message.channel.send(
+                    f"{message.author.mention} wrong code — your new code is **`{new_code}`**"
                 )
-                await message.delete()
                 await asyncio.sleep(6)
-                await msg.delete()
+                try:
+                    await wrong_msg.delete()
+                except Exception:
+                    pass
             return
 
     await bot.process_commands(message)
@@ -1160,11 +1171,12 @@ async def setupverify_cmd(ctx):
     e.set_author(name="Trial's Cross Trade  —  Verification")
     e.description = (
         "Welcome to **Trial's Cross Trade!**\n\n"
-        "To get access to the server you need to verify first.\n\n"
-        "• Click the button below\n"
-        "• You'll get a short code sent to you\n"
+        "Before you can access the server, you need to verify that you're human.\n\n"
+        "**How it works:**\n"
+        "• Hit the Verify button below\n"
+        "• You'll receive a short code only you can see\n"
         "• Type it in this channel and you're in\n\n"
-        "*this keeps the server safe from bots*"
+        "*takes less than 10 seconds — keeps us safe from bots & raiders*"
     )
     e.set_footer(text="Trial's Cross Trade  •  click below to get started")
     await ctx.send(embed=e, view=VerifyView())
