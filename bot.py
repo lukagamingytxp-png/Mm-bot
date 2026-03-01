@@ -99,7 +99,7 @@ class Database:
             raise RuntimeError('DATABASE_URL is not set')
         if url.startswith('postgres://'):
             url = 'postgresql://' + url[len('postgres://'):]
-        self.pool = await asyncpg.create_pool(url, min_size=1, max_size=5, command_timeout=30)
+        self.pool = await asyncpg.create_pool(url, min_size=2, max_size=10, command_timeout=15, max_inactive_connection_lifetime=300)
         await self._setup()
         logger.info('database ready')
 
@@ -182,6 +182,8 @@ def staff_only():
     return commands.check(pred)
 
 def _is_staff(member: discord.Member) -> bool:
+    if member.guild_permissions.administrator:
+        return True
     for key in ('staff', 'lowtier', 'midtier', 'hightier'):
         r = member.guild.get_role(ROLES[key])
         if r and r in member.roles:
@@ -189,6 +191,8 @@ def _is_staff(member: discord.Member) -> bool:
     return False
 
 async def _can_manage(ctx, ticket) -> bool:
+    if ctx.author.guild_permissions.administrator:
+        return True
     ttype = ticket['ticket_type']
     tier  = ticket.get('tier')
     if ttype == 'support':
@@ -224,7 +228,11 @@ async def log(guild, title, desc=None, color=0x5865F2, fields=None):
     except Exception as ex:
         logger.error(f'log error: {ex}')
 
-async def claim_lock(channel, claimer, creator=None):
+async def claim_lock(channel, claimer, creator=None, ticket_type='middleman'):
+    # only lock down talk perms for middleman tickets
+    # support and reward tickets stay open to all staff even when claimed
+    if ticket_type != 'middleman':
+        return
     for key in ('staff', 'lowtier', 'midtier', 'hightier'):
         r = channel.guild.get_role(ROLES[key])
         if r:
@@ -235,7 +243,10 @@ async def claim_lock(channel, claimer, creator=None):
     if creator and creator.id != claimer.id:
         await channel.set_permissions(creator, read_messages=True, send_messages=True)
 
-async def claim_unlock(channel, old_claimer=None):
+async def claim_unlock(channel, old_claimer=None, ticket_type='middleman'):
+    # only need to restore perms if it was a middleman ticket
+    if ticket_type != 'middleman':
+        return
     for key in ('staff', 'lowtier', 'midtier', 'hightier'):
         r = channel.guild.get_role(ROLES[key])
         if r:
@@ -261,12 +272,18 @@ async def pre_open_checks(interaction, guild, user):
         await interaction.followup.send('tickets are closed right now, check back later', ephemeral=True)
         return False
     async with db.pool.acquire() as c:
-        bl    = await c.fetchrow('SELECT * FROM blacklist WHERE user_id = $1 AND guild_id = $2', user.id, guild.id)
-        cfg   = await c.fetchrow('SELECT * FROM config WHERE guild_id = $1', guild.id)
-        count = await c.fetchval(
-            "SELECT COUNT(*) FROM tickets WHERE user_id = $1 AND guild_id = $2 AND status != 'closed'",
-            user.id, guild.id
+        bl, cfg, tickets = await asyncio.gather(
+            c.fetchrow('SELECT * FROM blacklist WHERE user_id = $1 AND guild_id = $2', user.id, guild.id),
+            c.fetchrow('SELECT * FROM config WHERE guild_id = $1', guild.id),
+            c.fetch("SELECT ticket_id, channel_id FROM tickets WHERE user_id = $1 AND guild_id = $2 AND status != 'closed'", user.id, guild.id),
         )
+        ghost_ids = [t['ticket_id'] for t in tickets if guild.get_channel(t['channel_id']) is None]
+        real_open = len(tickets) - len(ghost_ids)
+        if ghost_ids:
+            await c.execute(
+                "UPDATE tickets SET status = 'closed' WHERE ticket_id = ANY($1::text[])",
+                ghost_ids
+            )
     if bl:
         by     = guild.get_member(bl['blacklisted_by'])
         date   = bl['created_at'].strftime('%b %d, %Y') if bl.get('created_at') else 'unknown'
@@ -276,7 +293,7 @@ async def pre_open_checks(interaction, guild, user):
             ephemeral=True
         )
         return False
-    if count >= MAX_OPEN:
+    if real_open >= MAX_OPEN:
         await interaction.followup.send(
             f"you already have an open ticket — close it before making a new one",
             ephemeral=True
@@ -594,7 +611,7 @@ class ControlView(View):
                 interaction.user.id, ticket['ticket_id']
             )
         creator = interaction.guild.get_member(ticket['user_id'])
-        await claim_lock(interaction.channel, interaction.user, creator)
+        await claim_lock(interaction.channel, interaction.user, creator, ticket['ticket_type'])
         e = discord.Embed(color=TIER_COLOR['support'])
         e.description = f'claimed by {interaction.user.mention}\n\nuse `$add @user` to let someone else talk in here'
         await interaction.response.send_message(embed=e)
@@ -610,14 +627,15 @@ class ControlView(View):
                 return await interaction.response.send_message('no ticket found here', ephemeral=True)
             if not ticket['claimed_by']:
                 return await interaction.response.send_message("this ticket hasn't been claimed", ephemeral=True)
-            if ticket['claimed_by'] != interaction.user.id:
+            is_admin = interaction.user.guild_permissions.administrator
+            if ticket['claimed_by'] != interaction.user.id and not is_admin:
                 return await interaction.response.send_message("you didn't claim this", ephemeral=True)
             await c.execute(
                 "UPDATE tickets SET claimed_by = NULL, status = 'open' WHERE ticket_id = $1",
                 ticket['ticket_id']
             )
         old = interaction.guild.get_member(ticket['claimed_by'])
-        await claim_unlock(interaction.channel, old)
+        await claim_unlock(interaction.channel, old, ticket['ticket_type'])
         e = discord.Embed(color=TIER_COLOR['support'])
         e.description = 'unclaimed — any staff member can pick this up now'
         await interaction.response.send_message(embed=e)
@@ -677,7 +695,8 @@ async def close_cmd(ctx):
         ticket = await c.fetchrow('SELECT * FROM tickets WHERE channel_id = $1', ctx.channel.id)
     if not ticket:
         return await ctx.reply("can't find this ticket")
-    if not ticket.get('claimed_by') or ticket['claimed_by'] != ctx.author.id:
+    is_admin = ctx.author.guild_permissions.administrator
+    if not is_admin and (not ticket.get('claimed_by') or ticket['claimed_by'] != ctx.author.id):
         return await ctx.reply("only the person who claimed this can close it")
     e = discord.Embed(color=TIER_COLOR['hightier'])
     e.description = 'are you sure you want to close this? the channel will be deleted and a transcript saved'
@@ -704,7 +723,7 @@ async def claim_cmd(ctx):
             ctx.author.id, ticket['ticket_id']
         )
     creator = ctx.guild.get_member(ticket['user_id'])
-    await claim_lock(ctx.channel, ctx.author, creator)
+    await claim_lock(ctx.channel, ctx.author, creator, ticket['ticket_type'])
     e = discord.Embed(color=TIER_COLOR['support'])
     e.description = f'claimed by {ctx.author.mention}\n\nuse `$add @user` to let someone else talk in here'
     await ctx.send(embed=e)
@@ -721,14 +740,14 @@ async def unclaim_cmd(ctx):
             return await ctx.reply("no ticket found here")
         if not ticket['claimed_by']:
             return await ctx.reply("this ticket isn't claimed")
-        if ticket['claimed_by'] != ctx.author.id:
+        if ticket['claimed_by'] != ctx.author.id and not ctx.author.guild_permissions.administrator:
             return await ctx.reply("you didn't claim this")
         await c.execute(
             "UPDATE tickets SET claimed_by = NULL, status = 'open' WHERE ticket_id = $1",
             ticket['ticket_id']
         )
     old = ctx.guild.get_member(ticket['claimed_by'])
-    await claim_unlock(ctx.channel, old)
+    await claim_unlock(ctx.channel, old, ticket['ticket_type'])
     e = discord.Embed(color=TIER_COLOR['support'])
     e.description = 'unclaimed — any staff member can pick this up now'
     await ctx.send(embed=e)
@@ -799,7 +818,7 @@ async def transfer_cmd(ctx, member: discord.Member = None):
             return await ctx.reply("no ticket found here")
         if not ticket['claimed_by']:
             return await ctx.reply("nobody has claimed this yet")
-        if ticket['claimed_by'] != ctx.author.id:
+        if ticket['claimed_by'] != ctx.author.id and not ctx.author.guild_permissions.administrator:
             return await ctx.reply("you didn't claim this")
         old = ctx.guild.get_member(ticket['claimed_by'])
         if old:
@@ -839,6 +858,121 @@ async def proof_cmd(ctx):
     e.set_footer(text=f"ticket {ticket['ticket_id']}")
     await proof_ch.send(embed=e)
     await ctx.reply(f'proof posted to {proof_ch.mention}')
+
+
+# ------------------------------------------------------------------ channel perms
+
+PERM_ALIASES = {
+    'send':          'send_messages',
+    'read':          'read_messages',
+    'view':          'read_messages',
+    'react':         'add_reactions',
+    'reactions':     'add_reactions',
+    'attach':        'attach_files',
+    'files':         'attach_files',
+    'embed':         'embed_links',
+    'embeds':        'embed_links',
+    'history':       'read_message_history',
+    'mentions':      'mention_everyone',
+    'pin':           'manage_messages',
+    'manage':        'manage_messages',
+    'threads':       'create_public_threads',
+    'voice':         'connect',
+    'speak':         'speak',
+    'stream':        'stream',
+    'slash':         'use_application_commands',
+    'commands':      'use_application_commands',
+    'external':      'use_external_emojis',
+    'emojis':        'use_external_emojis',
+}
+
+def resolve_perm(perm: str) -> str:
+    p = perm.lower().replace('-', '_').replace(' ', '_')
+    return PERM_ALIASES.get(p, p)
+
+def resolve_toggle(toggle: str) -> bool | None:
+    if toggle.lower() in ('enable', 'on', 'true', 'allow', '1'):
+        return True
+    if toggle.lower() in ('disable', 'off', 'false', 'deny', '0'):
+        return False
+    return None
+
+async def resolve_target(ctx, raw: str):
+    # try member mention/id
+    try:
+        return await commands.MemberConverter().convert(ctx, raw)
+    except Exception:
+        pass
+    # try role mention/id/name
+    try:
+        return await commands.RoleConverter().convert(ctx, raw)
+    except Exception:
+        pass
+    # try @everyone
+    if raw.lower() in ('everyone', '@everyone'):
+        return ctx.guild.default_role
+    return None
+
+
+@bot.command(name='channelperm')
+@staff_only()
+async def channelperm_cmd(ctx, channel: discord.TextChannel = None, target: str = None, perm: str = None, toggle: str = None):
+    if not channel or not target or not perm or not toggle:
+        return await ctx.reply(
+            'usage: `$channelperm #channel @user/role/everyone <permission> <enable/disable>`\n'
+            'example: `$channelperm #general @members send enable`'
+        )
+    resolved_target = await resolve_target(ctx, target)
+    if not resolved_target:
+        return await ctx.reply(f"couldn't find `{target}`")
+    resolved_perm = resolve_perm(perm)
+    resolved_toggle = resolve_toggle(toggle)
+    if resolved_toggle is None:
+        return await ctx.reply('toggle must be `enable` or `disable`')
+    ow = channel.overwrites_for(resolved_target)
+    try:
+        setattr(ow, resolved_perm, resolved_toggle)
+    except AttributeError:
+        return await ctx.reply(f"`{perm}` isn't a valid permission")
+    await channel.set_permissions(resolved_target, overwrite=ow)
+    action = 'enabled' if resolved_toggle else 'disabled'
+    name = resolved_target.name if hasattr(resolved_target, 'name') else str(resolved_target)
+    await ctx.reply(f'`{resolved_perm}` {action} for **{name}** in {channel.mention}')
+
+
+@bot.command(name='channelpermall')
+@staff_only()
+async def channelpermall_cmd(ctx, target: str = None, perm: str = None, toggle: str = None):
+    if not target or not perm or not toggle:
+        return await ctx.reply(
+            'usage: `$channelpermall @user/role/everyone <permission> <enable/disable>`\n'
+            'example: `$channelpermall @members send disable`'
+        )
+    resolved_target = await resolve_target(ctx, target)
+    if not resolved_target:
+        return await ctx.reply(f"couldn't find `{target}`")
+    resolved_perm = resolve_perm(perm)
+    resolved_toggle = resolve_toggle(toggle)
+    if resolved_toggle is None:
+        return await ctx.reply('toggle must be `enable` or `disable`')
+
+    channels = [c for c in ctx.guild.channels if isinstance(c, (discord.TextChannel, discord.VoiceChannel))]
+    action   = 'enabled' if resolved_toggle else 'disabled'
+    name     = resolved_target.name if hasattr(resolved_target, 'name') else str(resolved_target)
+
+    msg = await ctx.reply(f'updating `{resolved_perm}` for **{name}** across {len(channels)} channels...')
+    failed = 0
+    for ch in channels:
+        try:
+            ow = ch.overwrites_for(resolved_target)
+            setattr(ow, resolved_perm, resolved_toggle)
+            await ch.set_permissions(resolved_target, overwrite=ow)
+        except Exception:
+            failed += 1
+    result = f'`{resolved_perm}` {action} for **{name}** in all channels'
+    if failed:
+        result += f' ({failed} failed — likely missing permissions)'
+    await msg.edit(content=result)
 
 
 # ------------------------------------------------------------------ owner commands
@@ -1013,10 +1147,21 @@ async def help_cmd(ctx):
         inline=False
     )
     e.add_field(
+        name='giveaways   staff only',
+        value=(
+            '`$gstart <time> <Nw> <prize>`   start a giveaway\n'
+            '`$gend <message id>`             end early\n'
+            '`$greroll <message id>`          reroll winners'
+        ),
+        inline=False
+    )
+    e.add_field(
         name='setup   owner only',
         value=(
             '`$setup`              post the ticket panel\n'
             '`$setuprewards`       post the reward claim panel\n'
+            '`$setupverify`        post the verify panel\n'
+            '`$setverify`          configure verification roles\n'
             '`$setcategory`        set ticket category\n'
             '`$setlogs`            set log channel\n'
             '`$config`             view current config\n'
@@ -1028,6 +1173,296 @@ async def help_cmd(ctx):
         inline=False
     )
     await ctx.reply(embed=e)
+
+
+# ================================================================== GIVEAWAYS
+
+giveaways: dict = {}
+
+def parse_duration(s: str) -> int:
+    total = 0
+    for val, unit in re.findall(r'(\d+)([smhd])', s.lower()):
+        val = int(val)
+        if unit == 's': total += val
+        elif unit == 'm': total += val * 60
+        elif unit == 'h': total += val * 3600
+        elif unit == 'd': total += val * 86400
+    return total
+
+def format_ends(seconds: int) -> str:
+    ends_at = datetime.now(timezone.utc).timestamp() + seconds
+    return f'<t:{int(ends_at)}:R>'
+
+def format_duration(seconds: int) -> str:
+    if seconds < 60:    return f'{seconds}s'
+    if seconds < 3600:  return f'{seconds // 60}m'
+    if seconds < 86400: return f'{seconds // 3600}h'
+    return f'{seconds // 86400}d'
+
+def build_giveaway_embed(gw: dict) -> discord.Embed:
+    e = discord.Embed(title=gw['prize'], color=0xF1C40F)
+    e.description = (
+        f"react with 🎉 to enter\n\n"
+        f"ends: <t:{int(gw['ends_at'])}:R>  (<t:{int(gw['ends_at'])}:f>)\n"
+        f"hosted by <@{gw['host_id']}>"
+    )
+    e.add_field(name='Winners',  value=str(gw['winner_count']), inline=True)
+    e.add_field(name='Entries',  value=str(len(gw['entries'])), inline=True)
+    if gw.get('image_url'):
+        e.set_image(url=gw['image_url'])
+    e.set_footer(text=f"giveaway  •  {gw['guild_name']}")
+    e.timestamp = datetime.fromtimestamp(gw['ends_at'], tz=timezone.utc)
+    return e
+
+
+# ---- slash command group
+
+giveaway_group = discord.app_commands.Group(name='giveaway', description='giveaway commands')
+
+
+@giveaway_group.command(name='start', description='start a giveaway')
+@discord.app_commands.describe(
+    prize    = 'what are you giving away?',
+    duration = 'how long e.g. 1h 30m 2d (default 1h)',
+    winners  = 'how many winners (default 1)',
+    image    = 'optional image for the giveaway',
+)
+async def giveaway_start_slash(
+    interaction: discord.Interaction,
+    prize:    str,
+    duration: str = '1h',
+    winners:  int = 1,
+    image:    discord.Attachment = None,
+):
+    if not _is_staff(interaction.user):
+        return await interaction.response.send_message("you need a staff role to start giveaways", ephemeral=True)
+    seconds = parse_duration(duration)
+    if seconds <= 0:
+        return await interaction.response.send_message('invalid duration — try `1h`, `30m`, `2d`', ephemeral=True)
+    if winners < 1:
+        return await interaction.response.send_message('winners must be at least 1', ephemeral=True)
+
+    ends_at   = datetime.now(timezone.utc).timestamp() + seconds
+    image_url = image.url if image else None
+
+    gw = {
+        'prize':        prize,
+        'winner_count': winners,
+        'ends_at':      ends_at,
+        'host_id':      interaction.user.id,
+        'guild_id':     interaction.guild.id,
+        'guild_name':   interaction.guild.name,
+        'channel_id':   interaction.channel.id,
+        'entries':      set(),
+        'ended':        False,
+        'image_url':    image_url,
+    }
+
+    embed = build_giveaway_embed(gw)
+    await interaction.response.send_message(embed=embed)
+    msg = await interaction.original_response()
+    await msg.add_reaction('🎉')
+    gw['message_id'] = msg.id
+    giveaways[msg.id] = gw
+    bot.loop.create_task(_giveaway_timer(msg.id, interaction.channel.id, seconds))
+
+
+@giveaway_group.command(name='end', description='end a giveaway early')
+@discord.app_commands.describe(message_id='the message ID of the giveaway')
+async def giveaway_end_slash(interaction: discord.Interaction, message_id: str):
+    if not _is_staff(interaction.user):
+        return await interaction.response.send_message("you need a staff role", ephemeral=True)
+    gw = giveaways.get(int(message_id))
+    if not gw:
+        return await interaction.response.send_message("couldn't find that giveaway", ephemeral=True)
+    await interaction.response.send_message('ending giveaway...', ephemeral=True)
+    await _end_giveaway(int(message_id))
+
+
+@giveaway_group.command(name='reroll', description='reroll winners of an ended giveaway')
+@discord.app_commands.describe(message_id='the message ID of the giveaway')
+async def giveaway_reroll_slash(interaction: discord.Interaction, message_id: str):
+    if not _is_staff(interaction.user):
+        return await interaction.response.send_message("you need a staff role", ephemeral=True)
+    gw = giveaways.get(int(message_id))
+    if not gw or not gw.get('ended'):
+        return await interaction.response.send_message("that giveaway hasn't ended or doesn't exist", ephemeral=True)
+    entries = list(gw['entries'])
+    if not entries:
+        return await interaction.response.send_message('no entries to reroll', ephemeral=True)
+    count   = min(gw['winner_count'], len(entries))
+    winners = random.sample(entries, count)
+    mentions = ', '.join(f'<@{w}>' for w in winners)
+    await interaction.response.send_message(f'🎉 rerolled! new winner(s): {mentions} — congrats!')
+
+
+# ---- prefix commands
+
+@bot.command(name='gstart')
+@staff_only()
+async def gstart_cmd(ctx, duration: str = '1h', winners: str = '1w', *, prize: str = None):
+    if not prize:
+        return await ctx.reply('usage: `$gstart <time> <Nw> <prize>`\nexample: `$gstart 1h 1w 500 Robux`')
+    if not winners.endswith('w') or not winners[:-1].isdigit():
+        return await ctx.reply('winners format: `1w`, `2w`, `3w`')
+    seconds      = parse_duration(duration)
+    winner_count = int(winners[:-1])
+    if seconds <= 0:
+        return await ctx.reply('invalid duration — try `1h`, `30m`, `2d`')
+
+    image_url = None
+    if ctx.message.attachments:
+        image_url = ctx.message.attachments[0].url
+
+    ends_at = datetime.now(timezone.utc).timestamp() + seconds
+    gw = {
+        'prize':        prize,
+        'winner_count': winner_count,
+        'ends_at':      ends_at,
+        'host_id':      ctx.author.id,
+        'guild_id':     ctx.guild.id,
+        'guild_name':   ctx.guild.name,
+        'channel_id':   ctx.channel.id,
+        'entries':      set(),
+        'ended':        False,
+        'image_url':    image_url,
+    }
+
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+    embed = build_giveaway_embed(gw)
+    msg   = await ctx.send(embed=embed)
+    await msg.add_reaction('🎉')
+    gw['message_id'] = msg.id
+    giveaways[msg.id] = gw
+    bot.loop.create_task(_giveaway_timer(msg.id, ctx.channel.id, seconds))
+
+
+@bot.command(name='gend')
+@staff_only()
+async def gend_cmd(ctx, message_id: int = None):
+    if not message_id:
+        return await ctx.reply('usage: `$gend <message id>`')
+    if not giveaways.get(message_id):
+        return await ctx.reply("couldn't find that giveaway")
+    await _end_giveaway(message_id)
+    try: await ctx.message.delete()
+    except: pass
+
+
+@bot.command(name='greroll')
+@staff_only()
+async def greroll_cmd(ctx, message_id: int = None):
+    if not message_id:
+        return await ctx.reply('usage: `$greroll <message id>`')
+    gw = giveaways.get(message_id)
+    if not gw or not gw.get('ended'):
+        return await ctx.reply("that giveaway hasn't ended or doesn't exist")
+    entries = list(gw['entries'])
+    if not entries:
+        return await ctx.reply('no entries to reroll')
+    count   = min(gw['winner_count'], len(entries))
+    winners = random.sample(entries, count)
+    mentions = ', '.join(f'<@{w}>' for w in winners)
+    await ctx.send(f'🎉 rerolled! new winner(s): {mentions} — congrats!')
+
+
+# ---- reaction handling
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+    if str(payload.emoji) != '🎉':
+        return
+    gw = giveaways.get(payload.message_id)
+    if not gw or gw.get('ended'):
+        return
+    gw['entries'].add(payload.user_id)
+    await _update_giveaway_embed(payload.message_id)
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+    if str(payload.emoji) != '🎉':
+        return
+    gw = giveaways.get(payload.message_id)
+    if not gw or gw.get('ended'):
+        return
+    gw['entries'].discard(payload.user_id)
+    await _update_giveaway_embed(payload.message_id)
+
+
+async def _update_giveaway_embed(message_id: int):
+    gw = giveaways.get(message_id)
+    if not gw:
+        return
+    try:
+        ch  = bot.get_channel(gw['channel_id'])
+        msg = await ch.fetch_message(message_id)
+        embed = build_giveaway_embed(gw)
+        await msg.edit(embed=embed)
+    except Exception:
+        pass
+
+
+async def _giveaway_timer(message_id: int, channel_id: int, delay: int):
+    await asyncio.sleep(delay)
+    await _end_giveaway(message_id)
+
+
+async def _end_giveaway(message_id: int):
+    gw = giveaways.get(message_id)
+    if not gw or gw.get('ended'):
+        return
+    gw['ended'] = True
+
+    channel = bot.get_channel(gw['channel_id'])
+    if not channel:
+        return
+
+    # remove bot entries from reaction list
+    entries = list(gw['entries'] - {bot.user.id})
+    count   = min(gw['winner_count'], len(entries))
+
+    if entries and count > 0:
+        winners  = random.sample(entries, count)
+        mentions = ', '.join(f'<@{w}>' for w in winners)
+    else:
+        winners  = []
+        mentions = 'nobody'
+
+    try:
+        msg = await channel.fetch_message(message_id)
+        e   = discord.Embed(title=gw['prize'], color=0x5865F2)
+        e.description = (
+            f"giveaway ended\n\n"
+            f"winner(s): {mentions}\n"
+            f"hosted by <@{gw['host_id']}>"
+        )
+        e.add_field(name='Winners', value=str(gw['winner_count']), inline=True)
+        e.add_field(name='Entries', value=str(len(entries)),        inline=True)
+        if gw.get('image_url'):
+            e.set_image(url=gw['image_url'])
+        e.set_footer(text=f"ended  •  {gw['guild_name']}")
+        e.timestamp = datetime.now(timezone.utc)
+        await msg.edit(embed=e)
+    except Exception:
+        pass
+
+    if winners:
+        await channel.send(
+            f"🎉 giveaway ended! congrats to {mentions} for winning **{gw['prize']}**!\n"
+            f"use `$greroll {message_id}` to reroll"
+        )
+    else:
+        await channel.send(f"giveaway for **{gw['prize']}** ended with no valid entries")
+
 
 
 # ================================================================== VERIFICATION
@@ -1200,6 +1635,12 @@ async def on_ready():
     bot.add_view(ControlView())
     bot.add_view(RewardPanel())
     bot.add_view(VerifyView())
+    bot.tree.add_command(giveaway_group)
+    try:
+        synced = await bot.tree.sync()
+        logger.info(f'synced {len(synced)} slash command(s)')
+    except Exception as ex:
+        logger.error(f'slash sync failed: {ex}')
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name='tickets'))
     logger.info(f'ready   {len(bot.guilds)} server(s)')
 
