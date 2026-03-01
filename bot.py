@@ -140,6 +140,10 @@ class Database:
             for sql in [
                 'ALTER TABLE config ADD COLUMN IF NOT EXISTS ticket_counter INT DEFAULT 0',
                 'ALTER TABLE blacklist ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()',
+                'ALTER TABLE config ADD COLUMN IF NOT EXISTS verify_unverified_id BIGINT',
+                'ALTER TABLE config ADD COLUMN IF NOT EXISTS verify_verified_id BIGINT',
+                'ALTER TABLE config ADD COLUMN IF NOT EXISTS verify_member_id BIGINT',
+                'ALTER TABLE config ADD COLUMN IF NOT EXISTS verify_channel_id BIGINT',
             ]:
                 try:
                     await c.execute(sql)
@@ -272,10 +276,11 @@ async def pre_open_checks(interaction, guild, user):
         await interaction.followup.send('tickets are closed right now, check back later', ephemeral=True)
         return False
     async with db.pool.acquire() as c:
-        bl, cfg, tickets = await asyncio.gather(
-            c.fetchrow('SELECT * FROM blacklist WHERE user_id = $1 AND guild_id = $2', user.id, guild.id),
-            c.fetchrow('SELECT * FROM config WHERE guild_id = $1', guild.id),
-            c.fetch("SELECT ticket_id, channel_id FROM tickets WHERE user_id = $1 AND guild_id = $2 AND status != 'closed'", user.id, guild.id),
+        bl      = await c.fetchrow('SELECT * FROM blacklist WHERE user_id = $1 AND guild_id = $2', user.id, guild.id)
+        cfg     = await c.fetchrow('SELECT * FROM config WHERE guild_id = $1', guild.id)
+        tickets = await c.fetch(
+            "SELECT ticket_id, channel_id FROM tickets WHERE user_id = $1 AND guild_id = $2 AND status != 'closed'",
+            user.id, guild.id
         )
         ghost_ids = [t['ticket_id'] for t in tickets if guild.get_channel(t['channel_id']) is None]
         real_open = len(tickets) - len(ghost_ids)
@@ -359,9 +364,20 @@ class MiddlemanModal(Modal, title='Middleman Request'):
     async def on_submit(self, interaction: discord.Interaction):
         if not limiter.check(interaction.user.id, 'open', 10):
             return await interaction.response.send_message('slow down a bit', ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            return
         guild, user = interaction.guild, interaction.user
-        cfg = await pre_open_checks(interaction, guild, user)
+        try:
+            cfg = await pre_open_checks(interaction, guild, user)
+        except Exception as ex:
+            logger.error(f'pre_open_checks error: {ex}')
+            try:
+                await interaction.followup.send('something went wrong opening the ticket, try again', ephemeral=True)
+            except Exception:
+                pass
+            return
         if not cfg:
             return
         try:
@@ -446,9 +462,20 @@ class RewardModal(Modal, title='Claim a Reward'):
     async def on_submit(self, interaction: discord.Interaction):
         if not limiter.check(interaction.user.id, 'open', 10):
             return await interaction.response.send_message('slow down a bit', ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            return
         guild, user = interaction.guild, interaction.user
-        cfg = await pre_open_checks(interaction, guild, user)
+        try:
+            cfg = await pre_open_checks(interaction, guild, user)
+        except Exception as ex:
+            logger.error(f'pre_open_checks error: {ex}')
+            try:
+                await interaction.followup.send('something went wrong opening the ticket, try again', ephemeral=True)
+            except Exception:
+                pass
+            return
         if not cfg:
             return
         try:
@@ -519,9 +546,20 @@ class TicketPanel(View):
     async def support(self, interaction: discord.Interaction, _):
         if not limiter.check(interaction.user.id, 'open', 10):
             return await interaction.response.send_message('slow down a bit', ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            return
         guild, user = interaction.guild, interaction.user
-        cfg = await pre_open_checks(interaction, guild, user)
+        try:
+            cfg = await pre_open_checks(interaction, guild, user)
+        except Exception as ex:
+            logger.error(f'pre_open_checks error: {ex}')
+            try:
+                await interaction.followup.send('something went wrong opening the ticket, try again', ephemeral=True)
+            except Exception:
+                pass
+            return
         if not cfg:
             return
         try:
@@ -668,10 +706,10 @@ class CloseConfirm(View):
     async def cancel(self, interaction: discord.Interaction, _):
         if interaction.user.id != self.ctx.author.id:
             return await interaction.response.send_message("that's not yours to click", ephemeral=True)
+        await interaction.response.defer()
         e = discord.Embed(color=TIER_COLOR['support'])
         e.description = 'close cancelled'
         await interaction.message.edit(embed=e, view=None)
-        await interaction.response.defer()
 
     async def on_timeout(self):
         try:
@@ -1590,6 +1628,14 @@ async def setverify_cmd(ctx,
         'member':     member.id,
         'channel':    channel.id,
     }
+    async with db.pool.acquire() as c:
+        await c.execute(
+            '''INSERT INTO config (guild_id, verify_unverified_id, verify_verified_id, verify_member_id, verify_channel_id)
+               VALUES ($1,$2,$3,$4,$5)
+               ON CONFLICT (guild_id) DO UPDATE SET
+               verify_unverified_id=$2, verify_verified_id=$3, verify_member_id=$4, verify_channel_id=$5''',
+            ctx.guild.id, unverified.id, verified.id, member.id, channel.id
+        )
     await ctx.reply(
         f'verification set up\n'
         f'unverified role: {unverified.mention}\n'
@@ -1641,6 +1687,22 @@ async def on_ready():
         logger.info(f'synced {len(synced)} slash command(s)')
     except Exception as ex:
         logger.error(f'slash sync failed: {ex}')
+    # restore verify_config from DB
+    try:
+        async with db.pool.acquire() as c:
+            rows = await c.fetch(
+                'SELECT guild_id, verify_unverified_id, verify_verified_id, verify_member_id, verify_channel_id FROM config WHERE verify_channel_id IS NOT NULL'
+            )
+        for row in rows:
+            verify_config[row['guild_id']] = {
+                'unverified': row['verify_unverified_id'],
+                'verified':   row['verify_verified_id'],
+                'member':     row['verify_member_id'],
+                'channel':    row['verify_channel_id'],
+            }
+        logger.info(f'loaded verify config for {len(rows)} guild(s)')
+    except Exception as ex:
+        logger.error(f'verify config load: {ex}')
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name='tickets'))
     logger.info(f'ready   {len(bot.guilds)} server(s)')
 
