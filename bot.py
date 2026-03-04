@@ -37,7 +37,6 @@ PROOF_CHANNEL   = 1472695529883435091
 WELCOME_CHANNEL = 1472691302402359460
 INVITE_CHANNEL  = 1478500573304193134
 VERIFIED_ROLE   = 1447695298272166090
-J4J_GUILD_ID    = None  # set after fetching discord.gg/j4jfast on_ready
 UNVERIFIED_ROLE = 1455440583316475989
 MEMBER_ROLE     = 1438945860410151076
 VERIFY_CHANNEL  = 1447694834742595745
@@ -183,7 +182,6 @@ class Database:
                 'ALTER TABLE config ADD COLUMN IF NOT EXISTS welcome_channel_id BIGINT',
                 'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS rejoins INT DEFAULT 0',
                 'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS verified INT DEFAULT 0',
-                'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS j4j INT DEFAULT 0',
             ]:
                 try:
                     await c.execute(sql)
@@ -883,7 +881,13 @@ async def claim_cmd(ctx):
     creator = ctx.guild.get_member(ticket['user_id'])
     await claim_lock(ctx.channel, ctx.author, creator, ticket['ticket_type'])
     e = discord.Embed(color=0x57F287)
-    e.description = f'✅ claimed by {ctx.author.mention}\n\nuse `$add @user` to let someone else talk in here'
+    e.description = (
+        f'✅ **claimed by {ctx.author.mention}**\n\n'
+        f'`$unclaim` — drop the claim\n'
+        f'`$add @user` — let someone else talk\n'
+        f'`$transfer @user` — hand off to another staff\n'
+        f'`$close` — close & save transcript'
+    )
     await ctx.send(embed=e)
 
 
@@ -912,7 +916,7 @@ async def unclaim_cmd(ctx):
     old = ctx.guild.get_member(ticket['claimed_by'])
     await claim_unlock(ctx.channel, old, ticket['ticket_type'])
     e = discord.Embed(color=0x5865F2)
-    e.description = '↩️ unclaimed — any staff member can pick this up now'
+    e.description = f'↩️ **unclaimed** by {ctx.author.mention} — any eligible staff can now claim this'
     await ctx.send(embed=e)
 
 
@@ -932,7 +936,9 @@ async def add_cmd(ctx, member: discord.Member = None):
     if ticket['claimed_by'] != ctx.author.id and not ctx.author.guild_permissions.administrator:
         return await ctx.reply(embed=discord.Embed(description='❌ only the claimer can add people', color=0xED4245))
     await ctx.channel.set_permissions(member, read_messages=True, send_messages=True)
-    await ctx.reply(embed=discord.Embed(description=f'✅ {member.mention} can now talk in here', color=0x57F287))
+    e = discord.Embed(color=0x57F287)
+    e.description = f'✅ {member.mention} has been added to this ticket by {ctx.author.mention}'
+    await ctx.reply(embed=e)
 
 
 @bot.command(name='remove')
@@ -947,7 +953,9 @@ async def remove_cmd(ctx, member: discord.Member = None):
     if not ticket or not await _can_manage(ctx, ticket):
         return await ctx.reply(embed=discord.Embed(description="❌ you don't have permission to do that", color=0xED4245))
     await ctx.channel.set_permissions(member, overwrite=None)
-    await ctx.reply(embed=discord.Embed(description=f'✅ {member.mention} removed from this ticket', color=0x57F287))
+    e = discord.Embed(color=0x57F287)
+    e.description = f'✅ {member.mention} has been removed from this ticket by {ctx.author.mention}'
+    await ctx.reply(embed=e)
 
 
 @bot.command(name='rename')
@@ -961,9 +969,12 @@ async def rename_cmd(ctx, *, new_name: str = None):
         ticket = await c.fetchrow('SELECT * FROM tickets WHERE channel_id = $1', ctx.channel.id)
     if not ticket or not await _can_manage(ctx, ticket):
         return await ctx.reply(embed=discord.Embed(description="❌ you can't rename this", color=0xED4245))
-    safe = re.sub(r'[^a-z0-9\-]', '-', new_name.lower())
+    safe    = re.sub(r'[^a-z0-9\-]', '-', new_name.lower())
+    old_name = ctx.channel.name
     await ctx.channel.edit(name=f'ticket-{safe}')
-    await ctx.reply(embed=discord.Embed(description=f'✅ renamed to `ticket-{safe}`', color=0x57F287))
+    e = discord.Embed(color=0x57F287)
+    e.description = f'✅ renamed by {ctx.author.mention}\n`{old_name}` → `ticket-{safe}`'
+    await ctx.reply(embed=e)
 
 
 @bot.command(name='transfer')
@@ -992,7 +1003,11 @@ async def transfer_cmd(ctx, member: discord.Member = None):
         await ctx.channel.set_permissions(member, read_messages=True, send_messages=True)
         await c.execute('UPDATE tickets SET claimed_by = $1 WHERE ticket_id = $2', member.id, ticket['ticket_id'])
     e = discord.Embed(color=0x57F287)
-    e.description = f'🔄 transferred from {ctx.author.mention} to {member.mention}'
+    e.description = (
+        f'🔄 **ticket transferred**\n\n'
+        f'**From:** {ctx.author.mention}\n'
+        f'**To:** {member.mention}'
+    )
     await ctx.send(embed=e)
 
 
@@ -1025,7 +1040,9 @@ async def proof_cmd(ctx):
             pass
     e.set_footer(text=f'ticket #{ticket["ticket_id"]}')
     await proof_ch.send(embed=e)
-    await ctx.reply(embed=discord.Embed(description=f'✅ proof posted to {proof_ch.mention}', color=0x57F287))
+    e = discord.Embed(color=0x57F287)
+    e.description = f'✅ trade proof posted to {proof_ch.mention}'
+    await ctx.reply(embed=e)
 
 
 # ================================================================== channel perm commands
@@ -1216,7 +1233,9 @@ async def setcategory_cmd(ctx, category: discord.CategoryChannel = None):
             'INSERT INTO config (guild_id, ticket_category_id) VALUES ($1,$2) ON CONFLICT (guild_id) DO UPDATE SET ticket_category_id = $2',
             ctx.guild.id, category.id
         )
-    await ctx.reply(embed=discord.Embed(description=f'✅ ticket category set to {category.mention}', color=0x57F287))
+    e = discord.Embed(color=0x57F287)
+    e.description = f'✅ ticket category set to **{category.name}**\nnew tickets will be created here'
+    await ctx.reply(embed=e)
 
 
 @bot.command(name='setlogs')
@@ -1229,7 +1248,9 @@ async def setlogs_cmd(ctx, channel: discord.TextChannel = None):
             'INSERT INTO config (guild_id, log_channel_id) VALUES ($1,$2) ON CONFLICT (guild_id) DO UPDATE SET log_channel_id = $2',
             ctx.guild.id, channel.id
         )
-    await ctx.reply(embed=discord.Embed(description=f'✅ log channel set to {channel.mention}', color=0x57F287))
+    e = discord.Embed(color=0x57F287)
+    e.description = f'✅ log channel set to {channel.mention}\nticket transcripts and events will be logged here'
+    await ctx.reply(embed=e)
 
 
 @bot.command(name='config')
@@ -1274,14 +1295,18 @@ async def config_cmd(ctx):
 @owner_only()
 async def lock_cmd(ctx):
     tickets_locked[ctx.guild.id] = True
-    await ctx.reply(embed=discord.Embed(description='🔒 tickets are now locked — nobody can open new ones until you run `$unlock`', color=0xED4245))
+    e = discord.Embed(color=0xED4245)
+    e.description = f'🔒 **tickets locked** by {ctx.author.mention}\nnobody can open new tickets until `$unlock` is run'
+    await ctx.reply(embed=e)
 
 
 @bot.command(name='unlock')
 @owner_only()
 async def unlock_cmd(ctx):
     tickets_locked[ctx.guild.id] = False
-    await ctx.reply(embed=discord.Embed(description='🔓 tickets are open again', color=0x57F287))
+    e = discord.Embed(color=0x57F287)
+    e.description = f'🔓 **tickets unlocked** by {ctx.author.mention} — members can open tickets again'
+    await ctx.reply(embed=e)
 
 
 @bot.command(name='blacklist')
@@ -1294,9 +1319,12 @@ async def blacklist_cmd(ctx, member: discord.Member = None, *, reason: str = 'no
             'INSERT INTO blacklist (user_id, guild_id, reason, blacklisted_by) VALUES ($1,$2,$3,$4) ON CONFLICT (user_id, guild_id) DO UPDATE SET reason=$3, blacklisted_by=$4, created_at=NOW()',
             member.id, ctx.guild.id, reason, ctx.author.id
         )
+    from datetime import datetime as dt
     e = discord.Embed(title='🚫 User Blacklisted', color=0xED4245)
-    e.add_field(name='User',   value=member.mention, inline=True)
-    e.add_field(name='Reason', value=reason,         inline=False)
+    e.add_field(name='User',   value=member.mention,               inline=True)
+    e.add_field(name='By',     value=ctx.author.mention,           inline=True)
+    e.add_field(name='Reason', value=reason,                       inline=False)
+    e.set_thumbnail(url=member.display_avatar.url)
     await ctx.reply(embed=e)
 
 
@@ -1351,18 +1379,12 @@ async def invites_cmd(ctx, member: discord.Member = None):
 
     e = discord.Embed(color=0x5865F2)
     e.set_author(name='Invite Log', icon_url=member.display_avatar.url)
-    async with db.pool.acquire() as c2:
-        j4j_count = (await c2.fetchrow(
-            'SELECT j4j FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
-            ctx.guild.id, member.id
-        ) or {}).get('j4j', 0)
     e.description = (
         f'## » {member.display_name} has {real} {word}\n\n'
         f'**Joins**    :  {joins}\n'
         f'**Left**     :  {leaves}\n'
         f'**Fake**     :  {fake}\n'
         f'**Rejoins**  :  {rejoins} *(7d)*\n'
-        f'**J4J**      :  {j4j_count}\n'
         f'**Verified** :  {verified_count}'
     )
     e.set_thumbnail(url=member.display_avatar.url)
@@ -1398,10 +1420,10 @@ async def lb_cmd(ctx):
         lines.append(
             f'{medal} {name} — **{real}** {word}\n'
             f'**Left:** {row["leaves"]}  **Fake:** {row["fake"]}  '
-            f'**Rejoins:** {row["rejoins"]}  **J4J:** {row.get("j4j", 0)}  **Verified:** {row["verified"]}'
+            f'**Rejoins:** {row["rejoins"]}  **Verified:** {row["verified"]}'
         )
 
-    e = discord.Embed(title='Invite Leaderboard', color=0x5865F2)
+    e = discord.Embed(title=f'📊 Invite Leaderboard  •  {ctx.guild.name}', color=0x5865F2)
     e.description = '\n'.join(lines)
     e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -1430,10 +1452,9 @@ async def clearinvites_cmd(ctx, target: str = None):
             await c.execute(
                 'DELETE FROM member_left WHERE guild_id=$1', ctx.guild.id
             )
-        await ctx.reply(embed=discord.Embed(
-            description='✅ all invite stats have been reset for this server',
-            color=0x57F287
-        ))
+        e = discord.Embed(color=0x57F287)
+        e.description = f'✅ all invite stats reset for **{ctx.guild.name}**\neveryone starts from 0'
+        await ctx.reply(embed=e)
         return
 
     # try to resolve as a member
@@ -1481,10 +1502,10 @@ async def snipe_cmd(ctx):
             description='🔍 nothing to snipe in this channel',
             color=0x5865F2
         ))
-    e = discord.Embed(color=0x5865F2)
+    e = discord.Embed(title='🔍 Deleted Message', color=0x5865F2)
     e.set_author(name=data['author'].display_name, icon_url=data['avatar'])
     e.description = data['content']
-    e.set_footer(text=f'Sniped by {ctx.author.display_name}')
+    e.set_footer(text=f'Sniped in #{ctx.channel.name} by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1495,7 +1516,7 @@ async def membercount_cmd(ctx):
     bots    = sum(1 for m in guild.members if m.bot)
     humans  = total - bots
     online  = sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot)
-    e = discord.Embed(title=f'{guild.name}  •  Member Count', color=0x5865F2)
+    e = discord.Embed(title=f'👥 {guild.name}  •  Member Count', color=0x5865F2)
     e.set_thumbnail(url=guild.icon.url if guild.icon else None)
     e.add_field(name='👥 Total',   value=str(total),  inline=True)
     e.add_field(name='🧑 Humans',  value=str(humans), inline=True)
@@ -1544,7 +1565,7 @@ async def botlist_cmd(ctx):
             color=0x5865F2
         ))
     lines = [f'**{i}.** {b.mention}  •  `{b.name}`' for i, b in enumerate(bots, 1)]
-    e = discord.Embed(title=f'🤖 Bots  •  {len(bots)} total', color=0x5865F2)
+    e = discord.Embed(title=f'🤖 Bots in {ctx.guild.name}  •  {len(bots)} total', color=0x5865F2)
     e.description = '\n'.join(lines)
     await ctx.reply(embed=e)
 
@@ -1813,8 +1834,6 @@ async def on_member_join(member: discord.Member):
 
             is_rejoin = False
             is_fake   = False
-            is_j4j    = False
-
             if is_new_account:
                 is_fake = True
             elif left_row:
@@ -1824,16 +1843,7 @@ async def on_member_join(member: discord.Member):
                     is_rejoin = True
                 # left > 7 days ago = just a normal join, no penalty
 
-            # 4. j4j check — see if member is in the j4j server
-            if not is_fake and not is_rejoin:
-                try:
-                    j4j_guild = bot.get_guild(J4J_GUILD_ID) if J4J_GUILD_ID else None
-                    if j4j_guild:
-                        j4j_member = j4j_guild.get_member(member.id)
-                        if j4j_member:
-                            is_j4j = True
-                except Exception:
-                    pass
+
 
             # ── update DB ────────────────────────────────────────────
             async with db.pool.acquire() as c:
@@ -1886,18 +1896,7 @@ async def on_member_join(member: discord.Member):
                 note = ' *(fake — account too new)*'
             elif is_fake:
                 note = ' *(fake)*'
-            elif is_j4j:
-                note = ' *(j4j)*'
-                # increment j4j counter (doesn't subtract from real invites, just tracked)
-                try:
-                    async with db.pool.acquire() as c:
-                        await c.execute(
-                            '''INSERT INTO invite_stats (guild_id, inviter_id, j4j) VALUES ($1,$2,1)
-                               ON CONFLICT (guild_id, inviter_id) DO UPDATE SET j4j = invite_stats.j4j + 1''',
-                            guild.id, inviter.id
-                        )
-                except Exception:
-                    pass
+
             else:
                 note = ''
 
@@ -2047,14 +2046,7 @@ async def setupverify_cmd(ctx):
 @bot.event
 async def on_ready():
     logger.info(f'logged in as {bot.user}')
-    # resolve j4j guild ID from invite
-    global J4J_GUILD_ID
-    try:
-        invite = await bot.fetch_invite('j4jfast')
-        J4J_GUILD_ID = invite.guild.id
-        logger.info(f'j4j guild resolved: {J4J_GUILD_ID}')
-    except Exception as ex:
-        logger.warning(f'j4j guild resolve failed: {ex}')
+
     try:
         await db.connect()
     except Exception as ex:
