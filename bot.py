@@ -37,6 +37,7 @@ PROOF_CHANNEL   = 1472695529883435091
 WELCOME_CHANNEL = 1472691302402359460
 INVITE_CHANNEL  = 1478500573304193134
 VERIFIED_ROLE   = 1447695298272166090
+J4J_GUILD_ID    = None  # set after fetching discord.gg/j4jfast on_ready
 UNVERIFIED_ROLE = 1455440583316475989
 MEMBER_ROLE     = 1438945860410151076
 VERIFY_CHANNEL  = 1447694834742595745
@@ -182,6 +183,7 @@ class Database:
                 'ALTER TABLE config ADD COLUMN IF NOT EXISTS welcome_channel_id BIGINT',
                 'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS rejoins INT DEFAULT 0',
                 'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS verified INT DEFAULT 0',
+                'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS j4j INT DEFAULT 0',
             ]:
                 try:
                     await c.execute(sql)
@@ -1347,19 +1349,23 @@ async def invites_cmd(ctx, member: discord.Member = None):
 
     word = 'invite' if real == 1 else 'invites'
 
-    e = discord.Embed(title='Invite log', color=0x5865F2)
-    e.set_author(
-        name=f'» {member.display_name} has {real} {word}',
-        icon_url=member.display_avatar.url
-    )
-    e.set_thumbnail(url=member.display_avatar.url)
+    e = discord.Embed(color=0x5865F2)
+    e.set_author(name='Invite Log', icon_url=member.display_avatar.url)
+    async with db.pool.acquire() as c2:
+        j4j_count = (await c2.fetchrow(
+            'SELECT j4j FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
+            ctx.guild.id, member.id
+        ) or {}).get('j4j', 0)
     e.description = (
+        f'## » {member.display_name} has {real} {word}\n\n'
         f'**Joins**    :  {joins}\n'
         f'**Left**     :  {leaves}\n'
         f'**Fake**     :  {fake}\n'
         f'**Rejoins**  :  {rejoins} *(7d)*\n'
+        f'**J4J**      :  {j4j_count}\n'
         f'**Verified** :  {verified_count}'
     )
+    e.set_thumbnail(url=member.display_avatar.url)
     e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -1392,7 +1398,7 @@ async def lb_cmd(ctx):
         lines.append(
             f'{medal} {name} — **{real}** {word}\n'
             f'**Left:** {row["leaves"]}  **Fake:** {row["fake"]}  '
-            f'**Rejoins:** {row["rejoins"]}  **Verified:** {row["verified"]}'
+            f'**Rejoins:** {row["rejoins"]}  **J4J:** {row.get("j4j", 0)}  **Verified:** {row["verified"]}'
         )
 
     e = discord.Embed(title='Invite Leaderboard', color=0x5865F2)
@@ -1450,57 +1456,162 @@ async def clearinvites_cmd(ctx, target: str = None):
     ))
 
 
+# ================================================================== utility commands
+
+# snipe cache: channel_id -> {content, author, avatar}
+snipe_cache = {}
+
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    if message.author.bot:
+        return
+    snipe_cache[message.channel.id] = {
+        'content': message.content or '*[embed or attachment]*',
+        'author':  message.author,
+        'avatar':  message.author.display_avatar.url,
+    }
+
+
+@bot.command(name='snipe', aliases=['sn'])
+async def snipe_cmd(ctx):
+    data = snipe_cache.get(ctx.channel.id)
+    if not data:
+        return await ctx.reply(embed=discord.Embed(
+            description='🔍 nothing to snipe in this channel',
+            color=0x5865F2
+        ))
+    e = discord.Embed(color=0x5865F2)
+    e.set_author(name=data['author'].display_name, icon_url=data['avatar'])
+    e.description = data['content']
+    e.set_footer(text=f'Sniped by {ctx.author.display_name}')
+    await ctx.reply(embed=e)
+
+
+@bot.command(name='membercount', aliases=['mc'])
+async def membercount_cmd(ctx):
+    guild   = ctx.guild
+    total   = guild.member_count
+    bots    = sum(1 for m in guild.members if m.bot)
+    humans  = total - bots
+    online  = sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot)
+    e = discord.Embed(title=f'{guild.name}  •  Member Count', color=0x5865F2)
+    e.set_thumbnail(url=guild.icon.url if guild.icon else None)
+    e.add_field(name='👥 Total',   value=str(total),  inline=True)
+    e.add_field(name='🧑 Humans',  value=str(humans), inline=True)
+    e.add_field(name='🤖 Bots',    value=str(bots),   inline=True)
+    e.add_field(name='🟢 Online',  value=str(online), inline=True)
+    await ctx.reply(embed=e)
+
+
+@bot.command(name='newest', aliases=['nw'])
+async def newest_cmd(ctx):
+    members = sorted(
+        [m for m in ctx.guild.members if not m.bot],
+        key=lambda m: m.joined_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True
+    )[:5]
+    e = discord.Embed(title='🆕 Newest Members', color=0x57F287)
+    lines = []
+    for i, m in enumerate(members, 1):
+        joined = m.joined_at.strftime('%b %d, %Y') if m.joined_at else '?'
+        lines.append(f'**{i}.** {m.mention}  •  joined {joined}')
+    e.description = '\n'.join(lines)
+    await ctx.reply(embed=e)
+
+
+@bot.command(name='oldest', aliases=['ol'])
+async def oldest_cmd(ctx):
+    members = sorted(
+        [m for m in ctx.guild.members if not m.bot],
+        key=lambda m: m.joined_at or datetime.now(timezone.utc)
+    )[:5]
+    e = discord.Embed(title='🏅 Longest Standing Members', color=0xF1C40F)
+    lines = []
+    for i, m in enumerate(members, 1):
+        joined = m.joined_at.strftime('%b %d, %Y') if m.joined_at else '?'
+        lines.append(f'**{i}.** {m.mention}  •  joined {joined}')
+    e.description = '\n'.join(lines)
+    await ctx.reply(embed=e)
+
+
+@bot.command(name='botlist', aliases=['bl'])
+async def botlist_cmd(ctx):
+    bots = sorted([m for m in ctx.guild.members if m.bot], key=lambda m: m.name.lower())
+    if not bots:
+        return await ctx.reply(embed=discord.Embed(
+            description='🤖 no bots found',
+            color=0x5865F2
+        ))
+    lines = [f'**{i}.** {b.mention}  •  `{b.name}`' for i, b in enumerate(bots, 1)]
+    e = discord.Embed(title=f'🤖 Bots  •  {len(bots)} total', color=0x5865F2)
+    e.description = '\n'.join(lines)
+    await ctx.reply(embed=e)
+
+
+
 HELP_PAGES = [
     {
-        'title': '📋 Commands  •  Page 1 / 4',
+        'title': '📋 Commands  •  Page 1 / 5',
         'name':  '🎫 Tickets  •  Staff & Middleman',
         'value': (
-            '`$claim`              claim a ticket\n'
-            '`$unclaim`            drop your claim\n'
-            '`$close`              close ticket & save transcript\n'
-            '`$add @user`          let someone talk in ticket\n'
-            '`$remove @user`       remove someone from ticket\n'
-            '`$rename name`        rename the ticket channel\n'
-            '`$transfer @user`     hand off your claim\n'
-            '`$proof`              post completed trade proof'
+            '`$claim`                  claim a ticket\n'
+            '`$unclaim`                drop your claim\n'
+            '`$close`                  close & save transcript\n'
+            '`$add @user`              let someone talk in ticket\n'
+            '`$remove @user`           remove someone from ticket\n'
+            '`$rename name`            rename the ticket channel\n'
+            '`$transfer @user`         hand off your claim\n'
+            '`$proof`                  post completed trade proof'
         ),
     },
     {
-        'title': '📋 Commands  •  Page 2 / 4',
-        'name':  '🔧 Channel Perms  •  Staff',
+        'title': '📋 Commands  •  Page 2 / 5',
+        'name':  '🔧 Staff Tools',
         'value': (
             '`$channelperm #ch @target perm on/off`\n'
-            '→ toggle a permission in a single channel\n\n'
+            '→ set a permission in one channel\n\n'
             '`$channelpermall @target perm on/off`\n'
-            '→ toggle a permission across all channels\n\n'
-            '**Permission aliases:** `send` `read` `react` `attach`\n'
-            '`embed` `history` `voice` `speak` `commands` `external`'
+            '→ set a permission across all channels\n\n'
+            '**Perm aliases:** `send` `read` `react` `attach` `embed`\n'
+            '`history` `voice` `speak` `commands` `external`'
         ),
     },
     {
-        'title': '📋 Commands  •  Page 3 / 4',
+        'title': '📋 Commands  •  Page 3 / 5',
+        'name':  '🔍 Utility  •  Everyone',
+        'value': (
+            '`$snipe` / `$sn`             last deleted message in channel\n'
+            '`$membercount` / `$mc`       total, human, bot & online count\n'
+            '`$newest` / `$nw`            5 most recently joined members\n'
+            '`$oldest` / `$ol`            5 longest standing members\n'
+            '`$botlist` / `$bl`           all bots in the server'
+        ),
+    },
+    {
+        'title': '📋 Commands  •  Page 4 / 5',
         'name':  '📨 Invites  •  Everyone',
         'value': (
-            '`$invites [@user]`         view invite stats\n'
-            '`$lb`                      invite leaderboard top 10\n'
-            '`$clearinvites all`        reset all server invites\n'
-            '`$clearinvites @user`      reset one user\'s invites'
+            '`$invites [@user]`              view invite stats\n'
+            '`$lb` / `$lbi` / `$invitelb`   invite leaderboard top 10\n'
+            '`$clearinvites all`             reset all server invites\n'
+            '`$clearinvites @user`           reset one user\'s invites'
         ),
     },
     {
-        'title': '📋 Commands  •  Page 4 / 4',
+        'title': '📋 Commands  •  Page 5 / 5',
         'name':  '⚙️ Setup  •  Owner Only',
         'value': (
-            '`$setup`              post ticket panel\n'
-            '`$setuprewards`       post reward claim panel\n'
-            '`$setupverify`        post verification panel\n'
-            '`$setcategory`        set ticket category\n'
-            '`$setlogs`            set log channel\n'
-            '`$config`             view full bot config\n'
-            '`$lock` / `$unlock`   open or close tickets\n'
-            '`$blacklist @user`    blacklist from tickets\n'
-            '`$unblacklist @user`  remove from blacklist\n'
-            '`$blacklists`         view all blacklisted users'
+            '`$setup`               post ticket panel\n'
+            '`$setuprewards`        post reward claim panel\n'
+            '`$setupverify`         post verification panel\n'
+            '`$setcategory`         set ticket category\n'
+            '`$setlogs`             set log channel\n'
+            '`$config`              view full bot config\n'
+            '`$lock` / `$unlock`    open or close tickets\n'
+            '`$blacklist @user`     blacklist from tickets\n'
+            '`$unblacklist @user`   remove from blacklist\n'
+            '`$blacklists`          view all blacklisted users'
         ),
     },
 ]
@@ -1685,20 +1796,59 @@ async def on_member_join(member: discord.Member):
 
     if inviter:
         try:
+            # ── determine join type ──────────────────────────────────
+            now_utc = datetime.now(timezone.utc)
+
+            # 1. account age < 5 days = fake
+            acc_age = now_utc - member.created_at.replace(tzinfo=timezone.utc) if member.created_at.tzinfo is None else now_utc - member.created_at
+            is_new_account = acc_age.days < 5
+
+            # 2. rejoin = left within 7 days
+            # 3. fake (left) = left more than 7 days ago
             async with db.pool.acquire() as c:
-                # check if this is a rejoin (left within last 7 days)
                 left_row = await c.fetchrow(
-                    """SELECT left_at FROM member_left
-                       WHERE guild_id=$1 AND user_id=$2
-                       AND left_at > NOW() - INTERVAL '7 days'""",
+                    'SELECT left_at FROM member_left WHERE guild_id=$1 AND user_id=$2',
                     guild.id, member.id
                 )
-                is_rejoin = left_row is not None
 
+            is_rejoin = False
+            is_fake   = False
+            is_j4j    = False
+
+            if is_new_account:
+                is_fake = True
+            elif left_row:
+                left_at = left_row['left_at'].replace(tzinfo=timezone.utc) if left_row['left_at'].tzinfo is None else left_row['left_at']
+                delta   = now_utc - left_at
+                if delta.days <= 7:
+                    is_rejoin = True
+                # left > 7 days ago = just a normal join, no penalty
+
+            # 4. j4j check — see if member is in the j4j server
+            if not is_fake and not is_rejoin:
+                try:
+                    j4j_guild = bot.get_guild(J4J_GUILD_ID) if J4J_GUILD_ID else None
+                    if j4j_guild:
+                        j4j_member = j4j_guild.get_member(member.id)
+                        if j4j_member:
+                            is_j4j = True
+                except Exception:
+                    pass
+
+            # ── update DB ────────────────────────────────────────────
+            async with db.pool.acquire() as c:
                 if is_rejoin:
                     await c.execute(
-                        '''INSERT INTO invite_stats (guild_id, inviter_id, rejoins) VALUES ($1,$2,1)
-                           ON CONFLICT (guild_id, inviter_id) DO UPDATE SET rejoins = invite_stats.rejoins + 1''',
+                        '''INSERT INTO invite_stats (guild_id, inviter_id, joins, rejoins) VALUES ($1,$2,1,1)
+                           ON CONFLICT (guild_id, inviter_id) DO UPDATE
+                           SET joins = invite_stats.joins + 1, rejoins = invite_stats.rejoins + 1''',
+                        guild.id, inviter.id
+                    )
+                elif is_fake:
+                    await c.execute(
+                        '''INSERT INTO invite_stats (guild_id, inviter_id, joins, fake) VALUES ($1,$2,1,1)
+                           ON CONFLICT (guild_id, inviter_id) DO UPDATE
+                           SET joins = invite_stats.joins + 1, fake = invite_stats.fake + 1''',
                         guild.id, inviter.id
                     )
                 else:
@@ -1708,31 +1858,52 @@ async def on_member_join(member: discord.Member):
                         guild.id, inviter.id
                     )
 
-                # record who invited this member for verified tracking
                 await c.execute(
                     '''INSERT INTO member_invites (guild_id, user_id, inviter_id)
                        VALUES ($1,$2,$3)
                        ON CONFLICT (guild_id, user_id) DO UPDATE SET inviter_id=$3, joined_at=NOW()''',
                     guild.id, member.id, inviter.id
                 )
-                # remove from left table now they're back
                 await c.execute(
                     'DELETE FROM member_left WHERE guild_id=$1 AND user_id=$2',
                     guild.id, member.id
                 )
-
                 row = await c.fetchrow(
-                    'SELECT joins, rejoins FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
+                    'SELECT joins, leaves, fake, rejoins FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
                     guild.id, inviter.id
                 )
+
             joins   = row['joins']   if row else 1
+            leaves  = row['leaves']  if row else 0
+            fake    = row['fake']    if row else 0
             rejoins = row['rejoins'] if row else 0
-            real    = joins - rejoins
+            real    = joins - leaves - fake - rejoins
             word    = 'invite' if real == 1 else 'invites'
-            rejoin_note = ' *(rejoin)*' if is_rejoin else ''
+
+            if is_rejoin:
+                note = ' *(rejoin)*'
+            elif is_fake and is_new_account:
+                note = ' *(fake — account too new)*'
+            elif is_fake:
+                note = ' *(fake)*'
+            elif is_j4j:
+                note = ' *(j4j)*'
+                # increment j4j counter (doesn't subtract from real invites, just tracked)
+                try:
+                    async with db.pool.acquire() as c:
+                        await c.execute(
+                            '''INSERT INTO invite_stats (guild_id, inviter_id, j4j) VALUES ($1,$2,1)
+                               ON CONFLICT (guild_id, inviter_id) DO UPDATE SET j4j = invite_stats.j4j + 1''',
+                            guild.id, inviter.id
+                        )
+                except Exception:
+                    pass
+            else:
+                note = ''
+
             await invite_ch.send(
                 f'{member.mention} has joined **{guild.name}**, invited by {inviter.mention}, '
-                f'who now has **{real}** {word}.{rejoin_note}'
+                f'who now has **{real}** {word}.{note}'
             )
         except Exception as ex:
             logger.error(f'invite log inviter: {ex}')
@@ -1876,6 +2047,14 @@ async def setupverify_cmd(ctx):
 @bot.event
 async def on_ready():
     logger.info(f'logged in as {bot.user}')
+    # resolve j4j guild ID from invite
+    global J4J_GUILD_ID
+    try:
+        invite = await bot.fetch_invite('j4jfast')
+        J4J_GUILD_ID = invite.guild.id
+        logger.info(f'j4j guild resolved: {J4J_GUILD_ID}')
+    except Exception as ex:
+        logger.warning(f'j4j guild resolve failed: {ex}')
     try:
         await db.connect()
     except Exception as ex:
