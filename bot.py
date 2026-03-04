@@ -1364,6 +1364,44 @@ async def invites_cmd(ctx, member: discord.Member = None):
     await ctx.reply(embed=e)
 
 
+@bot.command(name='lb', aliases=['leaderboardinvites', 'lbi', 'invitelb'])
+async def lb_cmd(ctx):
+    async with db.pool.acquire() as c:
+        rows = await c.fetch(
+            '''SELECT inviter_id, joins, leaves, fake, rejoins, verified
+               FROM invite_stats
+               WHERE guild_id=$1
+               ORDER BY (joins - leaves - fake - rejoins) DESC
+               LIMIT 10''',
+            ctx.guild.id
+        )
+    if not rows:
+        return await ctx.reply(embed=discord.Embed(
+            description='📊 no invite data yet',
+            color=0x5865F2
+        ))
+
+    lines = []
+    medals = {1: '🥇', 2: '🥈', 3: '🥉'}
+    for i, row in enumerate(rows, 1):
+        member = ctx.guild.get_member(row['inviter_id'])
+        name   = member.mention if member else f'`{row["inviter_id"]}`'
+        real   = row['joins'] - row['leaves'] - row['fake'] - row['rejoins']
+        word   = 'invite' if real == 1 else 'invites'
+        medal  = medals.get(i, f'`{i}.`')
+        lines.append(
+            f'{medal} {name} — **{real}** {word}\n'
+            f'**Left:** {row["leaves"]}  **Fake:** {row["fake"]}  '
+            f'**Rejoins:** {row["rejoins"]}  **Verified:** {row["verified"]}'
+        )
+
+    e = discord.Embed(title='Invite Leaderboard', color=0x5865F2)
+    e.description = '\n'.join(lines)
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
+    await ctx.reply(embed=e)
+
+
+
 @bot.command(name='clearinvites')
 @owner_only()
 async def clearinvites_cmd(ctx, target: str = None):
@@ -1412,12 +1450,11 @@ async def clearinvites_cmd(ctx, target: str = None):
     ))
 
 
-@bot.command(name='help')
-async def help_cmd(ctx):
-    e = discord.Embed(title='📋 Commands', color=TIER_COLOR['support'])
-    e.add_field(
-        name='🎫 Tickets  •  Staff & Middleman',
-        value=(
+HELP_PAGES = [
+    {
+        'title': '📋 Commands  •  Page 1 / 4',
+        'name':  '🎫 Tickets  •  Staff & Middleman',
+        'value': (
             '`$claim`              claim a ticket\n'
             '`$unclaim`            drop your claim\n'
             '`$close`              close ticket & save transcript\n'
@@ -1427,43 +1464,104 @@ async def help_cmd(ctx):
             '`$transfer @user`     hand off your claim\n'
             '`$proof`              post completed trade proof'
         ),
-        inline=False
-    )
-    e.add_field(
-        name='🔧 Channel Perms  •  Staff',
-        value=(
-            '`$channelperm #ch @target perm on/off`   single channel\n'
-            '`$channelpermall @target perm on/off`     all channels'
+    },
+    {
+        'title': '📋 Commands  •  Page 2 / 4',
+        'name':  '🔧 Channel Perms  •  Staff',
+        'value': (
+            '`$channelperm #ch @target perm on/off`\n'
+            '→ toggle a permission in a single channel\n\n'
+            '`$channelpermall @target perm on/off`\n'
+            '→ toggle a permission across all channels\n\n'
+            '**Permission aliases:** `send` `read` `react` `attach`\n'
+            '`embed` `history` `voice` `speak` `commands` `external`'
         ),
-        inline=False
-    )
-    e.add_field(
-        name='📨 Invites  •  Everyone',
-        value=(
+    },
+    {
+        'title': '📋 Commands  •  Page 3 / 4',
+        'name':  '📨 Invites  •  Everyone',
+        'value': (
             '`$invites [@user]`         view invite stats\n'
-            '`$clearinvites all`        reset all invites\n'
+            '`$lb`                      invite leaderboard top 10\n'
+            '`$clearinvites all`        reset all server invites\n'
             '`$clearinvites @user`      reset one user\'s invites'
         ),
-        inline=False
-    )
-    e.add_field(
-        name='⚙️ Setup  •  Owner Only',
-        value=(
+    },
+    {
+        'title': '📋 Commands  •  Page 4 / 4',
+        'name':  '⚙️ Setup  •  Owner Only',
+        'value': (
             '`$setup`              post ticket panel\n'
             '`$setuprewards`       post reward claim panel\n'
             '`$setupverify`        post verification panel\n'
             '`$setcategory`        set ticket category\n'
             '`$setlogs`            set log channel\n'
-            '`$config`             view current config\n'
+            '`$config`             view full bot config\n'
             '`$lock` / `$unlock`   open or close tickets\n'
-            '`$blacklist @user`    blacklist someone from tickets\n'
+            '`$blacklist @user`    blacklist from tickets\n'
             '`$unblacklist @user`  remove from blacklist\n'
             '`$blacklists`         view all blacklisted users'
         ),
-        inline=False
-    )
-    e.set_footer(text='Trial\'s Cross Trade  •  staff roles required where noted')
-    await ctx.reply(embed=e)
+    },
+]
+
+
+def make_help_embed(page: int) -> discord.Embed:
+    p = HELP_PAGES[page]
+    e = discord.Embed(title=p['title'], color=TIER_COLOR['support'])
+    e.add_field(name=p['name'], value=p['value'], inline=False)
+    e.set_footer(text="Trial's Cross Trade  •  use the buttons to navigate")
+    return e
+
+
+class HelpView(View):
+    def __init__(self, author_id: int, page: int = 0):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+        self.page      = page
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.prev_btn.disabled = self.page == 0
+        self.next_btn.disabled = self.page == len(HELP_PAGES) - 1
+
+    @discord.ui.button(label='◀ Prev', style=ButtonStyle.gray, custom_id='help_prev')
+    async def prev_btn(self, interaction: discord.Interaction, _):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                embed=discord.Embed(description='❌ this isn\'t your help menu', color=0xED4245),
+                ephemeral=True
+            )
+        self.page -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=make_help_embed(self.page), view=self)
+
+    @discord.ui.button(label='Next ▶', style=ButtonStyle.gray, custom_id='help_next')
+    async def next_btn(self, interaction: discord.Interaction, _):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                embed=discord.Embed(description='❌ this isn\'t your help menu', color=0xED4245),
+                ephemeral=True
+            )
+        self.page += 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=make_help_embed(self.page), view=self)
+
+    async def on_timeout(self):
+        try:
+            for item in self.children:
+                item.disabled = True
+            e = make_help_embed(self.page)
+            e.set_footer(text="This help menu has timed out — run $help again")
+            await self.message.edit(embed=e, view=self)
+        except Exception:
+            pass
+
+
+@bot.command(name='help')
+async def help_cmd(ctx):
+    view         = HelpView(author_id=ctx.author.id)
+    view.message = await ctx.reply(embed=make_help_embed(0), view=view)
 
 
 # ================================================================== verification
