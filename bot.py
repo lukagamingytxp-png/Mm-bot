@@ -150,7 +150,26 @@ class Database:
                     joins      INT DEFAULT 0,
                     leaves     INT DEFAULT 0,
                     fake       INT DEFAULT 0,
+                    rejoins    INT DEFAULT 0,
+                    verified   INT DEFAULT 0,
                     PRIMARY KEY (guild_id, inviter_id)
+                )
+            ''')
+            await c.execute('''
+                CREATE TABLE IF NOT EXISTS member_invites (
+                    guild_id   BIGINT,
+                    user_id    BIGINT,
+                    inviter_id BIGINT,
+                    joined_at  TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            ''')
+            await c.execute('''
+                CREATE TABLE IF NOT EXISTS member_left (
+                    guild_id BIGINT,
+                    user_id  BIGINT,
+                    left_at  TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (guild_id, user_id)
                 )
             ''')
             for sql in [
@@ -161,6 +180,8 @@ class Database:
                 'ALTER TABLE config ADD COLUMN IF NOT EXISTS verify_member_id BIGINT',
                 'ALTER TABLE config ADD COLUMN IF NOT EXISTS verify_channel_id BIGINT',
                 'ALTER TABLE config ADD COLUMN IF NOT EXISTS welcome_channel_id BIGINT',
+                'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS rejoins INT DEFAULT 0',
+                'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS verified INT DEFAULT 0',
             ]:
                 try:
                     await c.execute(sql)
@@ -1316,25 +1337,79 @@ async def invites_cmd(ctx, member: discord.Member = None):
             'SELECT * FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
             ctx.guild.id, member.id
         )
-    joins  = row['joins']  if row else 0
-    leaves = row['leaves'] if row else 0
-    fake   = row['fake']   if row else 0
-    real   = joins - leaves - fake
+        # count how many people they invited who are currently verified
+        verified_count = row['verified'] if row else 0
+    joins   = row['joins']   if row else 0
+    leaves  = row['leaves']  if row else 0
+    fake    = row['fake']    if row else 0
+    rejoins = row['rejoins'] if row else 0
+    real    = joins - leaves - fake - rejoins
 
-    verified_role = ctx.guild.get_role(VERIFIED_ROLE)
-    is_verified   = verified_role in member.roles if verified_role else False
+    word = 'invite' if real == 1 else 'invites'
 
-    e = discord.Embed(title='Invite Log', color=0x5865F2)
-    e.set_author(name=f'{member.display_name} has {real} invite{"s" if real != 1 else ""}', icon_url=member.display_avatar.url)
+    e = discord.Embed(title='Invite log', color=0x5865F2)
+    e.set_author(
+        name=f'» {member.display_name} has {real} {word}',
+        icon_url=member.display_avatar.url
+    )
     e.set_thumbnail(url=member.display_avatar.url)
     e.description = (
         f'**Joins**    :  {joins}\n'
         f'**Left**     :  {leaves}\n'
         f'**Fake**     :  {fake}\n'
-        f'**Verified** :  {"✅ Yes" if is_verified else "❌ No"}'
+        f'**Rejoins**  :  {rejoins} *(7d)*\n'
+        f'**Verified** :  {verified_count}'
     )
     e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
+
+
+@bot.command(name='clearinvites')
+@owner_only()
+async def clearinvites_cmd(ctx, target: str = None):
+    if not target:
+        e = discord.Embed(title='📋 clearinvites usage', color=0x5865F2)
+        e.description = (
+            '`$clearinvites all`      reset everyone\'s invites\n'
+            '`$clearinvites @user`    reset one person\'s invites'
+        )
+        return await ctx.reply(embed=e)
+
+    if target.lower() == 'all':
+        async with db.pool.acquire() as c:
+            await c.execute(
+                'DELETE FROM invite_stats WHERE guild_id=$1', ctx.guild.id
+            )
+            await c.execute(
+                'DELETE FROM member_invites WHERE guild_id=$1', ctx.guild.id
+            )
+            await c.execute(
+                'DELETE FROM member_left WHERE guild_id=$1', ctx.guild.id
+            )
+        await ctx.reply(embed=discord.Embed(
+            description='✅ all invite stats have been reset for this server',
+            color=0x57F287
+        ))
+        return
+
+    # try to resolve as a member
+    try:
+        member = await commands.MemberConverter().convert(ctx, target)
+    except Exception:
+        return await ctx.reply(embed=discord.Embed(
+            description=f"❌ couldn't find `{target}` — use `$clearinvites all` or mention a user",
+            color=0xED4245
+        ))
+
+    async with db.pool.acquire() as c:
+        await c.execute(
+            'DELETE FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
+            ctx.guild.id, member.id
+        )
+    await ctx.reply(embed=discord.Embed(
+        description=f'✅ invite stats cleared for {member.mention}',
+        color=0x57F287
+    ))
 
 
 @bot.command(name='help')
@@ -1364,7 +1439,11 @@ async def help_cmd(ctx):
     )
     e.add_field(
         name='📨 Invites  •  Everyone',
-        value='`$invites [@user]`     view someone\'s invite stats',
+        value=(
+            '`$invites [@user]`         view invite stats\n'
+            '`$clearinvites all`        reset all invites\n'
+            '`$clearinvites @user`      reset one user\'s invites'
+        ),
         inline=False
     )
     e.add_field(
@@ -1507,23 +1586,55 @@ async def on_member_join(member: discord.Member):
         return
 
     if inviter:
-        # update DB stats
         try:
             async with db.pool.acquire() as c:
+                # check if this is a rejoin (left within last 7 days)
+                left_row = await c.fetchrow(
+                    """SELECT left_at FROM member_left
+                       WHERE guild_id=$1 AND user_id=$2
+                       AND left_at > NOW() - INTERVAL '7 days'""",
+                    guild.id, member.id
+                )
+                is_rejoin = left_row is not None
+
+                if is_rejoin:
+                    await c.execute(
+                        '''INSERT INTO invite_stats (guild_id, inviter_id, rejoins) VALUES ($1,$2,1)
+                           ON CONFLICT (guild_id, inviter_id) DO UPDATE SET rejoins = invite_stats.rejoins + 1''',
+                        guild.id, inviter.id
+                    )
+                else:
+                    await c.execute(
+                        '''INSERT INTO invite_stats (guild_id, inviter_id, joins) VALUES ($1,$2,1)
+                           ON CONFLICT (guild_id, inviter_id) DO UPDATE SET joins = invite_stats.joins + 1''',
+                        guild.id, inviter.id
+                    )
+
+                # record who invited this member for verified tracking
                 await c.execute(
-                    '''INSERT INTO invite_stats (guild_id, inviter_id, joins) VALUES ($1,$2,1)
-                       ON CONFLICT (guild_id, inviter_id) DO UPDATE SET joins = invite_stats.joins + 1''',
-                    guild.id, inviter.id
+                    '''INSERT INTO member_invites (guild_id, user_id, inviter_id)
+                       VALUES ($1,$2,$3)
+                       ON CONFLICT (guild_id, user_id) DO UPDATE SET inviter_id=$3, joined_at=NOW()''',
+                    guild.id, member.id, inviter.id
                 )
+                # remove from left table now they're back
+                await c.execute(
+                    'DELETE FROM member_left WHERE guild_id=$1 AND user_id=$2',
+                    guild.id, member.id
+                )
+
                 row = await c.fetchrow(
-                    'SELECT joins FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
+                    'SELECT joins, rejoins FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
                     guild.id, inviter.id
                 )
-            total = row['joins'] if row else 1
-            word  = 'invite' if total == 1 else 'invites'
+            joins   = row['joins']   if row else 1
+            rejoins = row['rejoins'] if row else 0
+            real    = joins - rejoins
+            word    = 'invite' if real == 1 else 'invites'
+            rejoin_note = ' *(rejoin)*' if is_rejoin else ''
             await invite_ch.send(
                 f'{member.mention} has joined **{guild.name}**, invited by {inviter.mention}, '
-                f'who now has **{total}** {word}.'
+                f'who now has **{real}** {word}.{rejoin_note}'
             )
         except Exception as ex:
             logger.error(f'invite log inviter: {ex}')
@@ -1540,12 +1651,26 @@ async def on_member_join(member: discord.Member):
 
 @bot.event
 async def on_member_remove(member: discord.Member):
-    # update invite stats — find who invited them and increment their leave count
     try:
         async with db.pool.acquire() as c:
-            # we don't know who invited them at leave time, so we just log it globally
-            # this is a known limitation without a join->inviter mapping table
-            pass
+            # record when they left for rejoin detection
+            await c.execute(
+                '''INSERT INTO member_left (guild_id, user_id, left_at)
+                   VALUES ($1,$2,NOW())
+                   ON CONFLICT (guild_id, user_id) DO UPDATE SET left_at=NOW()''',
+                member.guild.id, member.id
+            )
+            # find who invited them and increment their leave count
+            inv_row = await c.fetchrow(
+                'SELECT inviter_id FROM member_invites WHERE guild_id=$1 AND user_id=$2',
+                member.guild.id, member.id
+            )
+            if inv_row:
+                await c.execute(
+                    '''INSERT INTO invite_stats (guild_id, inviter_id, leaves) VALUES ($1,$2,1)
+                       ON CONFLICT (guild_id, inviter_id) DO UPDATE SET leaves = invite_stats.leaves + 1''',
+                    member.guild.id, inv_row['inviter_id']
+                )
     except Exception as ex:
         logger.error(f'on_member_remove: {ex}')
 
@@ -1571,6 +1696,21 @@ async def on_message(message: discord.Message):
                     if member_r:
                         await message.author.add_roles(member_r, reason='verified')
                     captchas.pop(user_id, None)
+                    # increment inviter's verified count
+                    try:
+                        async with db.pool.acquire() as c:
+                            inv_row = await c.fetchrow(
+                                'SELECT inviter_id FROM member_invites WHERE guild_id=$1 AND user_id=$2',
+                                message.guild.id, message.author.id
+                            )
+                            if inv_row:
+                                await c.execute(
+                                    '''INSERT INTO invite_stats (guild_id, inviter_id, verified) VALUES ($1,$2,1)
+                                       ON CONFLICT (guild_id, inviter_id) DO UPDATE SET verified = invite_stats.verified + 1''',
+                                    message.guild.id, inv_row['inviter_id']
+                                )
+                    except Exception as ex:
+                        logger.error(f'verified count update: {ex}')
                     try:
                         await message.delete()
                     except Exception:
