@@ -181,6 +181,7 @@ class Database:
                 'ALTER TABLE config ADD COLUMN IF NOT EXISTS verify_channel_id BIGINT',
                 'ALTER TABLE config ADD COLUMN IF NOT EXISTS welcome_channel_id BIGINT',
                 'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS rejoins INT DEFAULT 0',
+                'ALTER TABLE member_invites ADD COLUMN IF NOT EXISTS is_rejoin BOOLEAN DEFAULT FALSE',
                 'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS verified INT DEFAULT 0',
             ]:
                 try:
@@ -1373,7 +1374,7 @@ async def invites_cmd(ctx, member: discord.Member = None):
     leaves  = row['leaves']  if row else 0
     fake    = row['fake']    if row else 0
     rejoins = row['rejoins'] if row else 0
-    real    = joins - leaves - fake - rejoins
+    real    = joins - leaves - fake
 
     word = 'invite' if real == 1 else 'invites'
 
@@ -1399,7 +1400,7 @@ async def lb_cmd(ctx):
             '''SELECT inviter_id, joins, leaves, fake, rejoins, verified
                FROM invite_stats
                WHERE guild_id=$1
-               ORDER BY (joins - leaves - fake - rejoins) DESC
+               ORDER BY (joins - leaves - fake) DESC
                LIMIT 10''',
             ctx.guild.id
         )
@@ -1414,7 +1415,7 @@ async def lb_cmd(ctx):
     for i, row in enumerate(rows, 1):
         member = ctx.guild.get_member(row['inviter_id'])
         name   = member.mention if member else f'`{row["inviter_id"]}`'
-        real   = row['joins'] - row['leaves'] - row['fake'] - row['rejoins']
+        real   = row['joins'] - row['leaves'] - row['fake']
         word   = 'invite' if real == 1 else 'invites'
         medal  = medals.get(i, f'`{i}.`')
         lines.append(
@@ -1848,10 +1849,11 @@ async def on_member_join(member: discord.Member):
             # ── update DB ────────────────────────────────────────────
             async with db.pool.acquire() as c:
                 if is_rejoin:
+                    # rejoins are purely informational — don't touch joins or leaves
                     await c.execute(
-                        '''INSERT INTO invite_stats (guild_id, inviter_id, joins, rejoins) VALUES ($1,$2,1,1)
+                        '''INSERT INTO invite_stats (guild_id, inviter_id, rejoins) VALUES ($1,$2,1)
                            ON CONFLICT (guild_id, inviter_id) DO UPDATE
-                           SET joins = invite_stats.joins + 1, rejoins = invite_stats.rejoins + 1''',
+                           SET rejoins = invite_stats.rejoins + 1''',
                         guild.id, inviter.id
                     )
                 elif is_fake:
@@ -1869,10 +1871,10 @@ async def on_member_join(member: discord.Member):
                     )
 
                 await c.execute(
-                    '''INSERT INTO member_invites (guild_id, user_id, inviter_id)
-                       VALUES ($1,$2,$3)
-                       ON CONFLICT (guild_id, user_id) DO UPDATE SET inviter_id=$3, joined_at=NOW()''',
-                    guild.id, member.id, inviter.id
+                    '''INSERT INTO member_invites (guild_id, user_id, inviter_id, is_rejoin)
+                       VALUES ($1,$2,$3,$4)
+                       ON CONFLICT (guild_id, user_id) DO UPDATE SET inviter_id=$3, joined_at=NOW(), is_rejoin=$4''',
+                    guild.id, member.id, inviter.id, is_rejoin
                 )
                 await c.execute(
                     'DELETE FROM member_left WHERE guild_id=$1 AND user_id=$2',
@@ -1887,7 +1889,7 @@ async def on_member_join(member: discord.Member):
             leaves  = row['leaves']  if row else 0
             fake    = row['fake']    if row else 0
             rejoins = row['rejoins'] if row else 0
-            real    = joins - leaves - fake - rejoins
+            real    = joins - leaves - fake
             word    = 'invite' if real == 1 else 'invites'
 
             if is_rejoin:
@@ -1930,10 +1932,11 @@ async def on_member_remove(member: discord.Member):
             )
             # find who invited them and increment their leave count
             inv_row = await c.fetchrow(
-                'SELECT inviter_id FROM member_invites WHERE guild_id=$1 AND user_id=$2',
+                'SELECT inviter_id, is_rejoin FROM member_invites WHERE guild_id=$1 AND user_id=$2',
                 member.guild.id, member.id
             )
-            if inv_row:
+            if inv_row and not inv_row.get('is_rejoin'):
+                # only count leave if they joined as a real invite (not rejoin)
                 await c.execute(
                     '''INSERT INTO invite_stats (guild_id, inviter_id, leaves) VALUES ($1,$2,1)
                        ON CONFLICT (guild_id, inviter_id) DO UPDATE SET leaves = invite_stats.leaves + 1''',
@@ -1968,7 +1971,7 @@ async def on_message(message: discord.Message):
                     try:
                         async with db.pool.acquire() as c:
                             inv_row = await c.fetchrow(
-                                'SELECT inviter_id FROM member_invites WHERE guild_id=$1 AND user_id=$2',
+                                'SELECT inviter_id, is_rejoin FROM member_invites WHERE guild_id=$1 AND user_id=$2',
                                 message.guild.id, message.author.id
                             )
                             if inv_row:
