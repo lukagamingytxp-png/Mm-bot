@@ -17,6 +17,7 @@ import asyncpg
 from discord import ButtonStyle
 from discord.ui import View, Select, Modal, TextInput
 from discord.ext import commands
+from discord import app_commands
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s  %(levelname)s  %(message)s')
 logger = logging.getLogger(__name__)
@@ -182,6 +183,36 @@ class Database:
                 'ALTER TABLE config ADD COLUMN IF NOT EXISTS welcome_channel_id BIGINT',
                 'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS rejoins INT DEFAULT 0',
                 'ALTER TABLE member_invites ADD COLUMN IF NOT EXISTS is_rejoin BOOLEAN DEFAULT FALSE',
+                """CREATE TABLE IF NOT EXISTS giveaways (
+                    id               SERIAL PRIMARY KEY,
+                    guild_id         BIGINT,
+                    channel_id       BIGINT,
+                    message_id       BIGINT,
+                    prize            TEXT,
+                    winners_count    INT DEFAULT 1,
+                    host_id          BIGINT,
+                    required_role_id BIGINT,
+                    image_url        TEXT,
+                    ends_at          TIMESTAMPTZ,
+                    ended            BOOLEAN DEFAULT FALSE
+                )""",
+                """CREATE TABLE IF NOT EXISTS giveaway_entries (
+                    id           SERIAL PRIMARY KEY,
+                    giveaway_id  INT REFERENCES giveaways(id) ON DELETE CASCADE,
+                    user_id      BIGINT
+                )""",
+                """CREATE TABLE IF NOT EXISTS giveaway_last_winners (
+                    guild_id   BIGINT,
+                    prize      TEXT,
+                    winner_ids BIGINT[],
+                    PRIMARY KEY (guild_id, prize)
+                )""",
+                """CREATE TABLE IF NOT EXISTS giveaway_bonus_roles (
+                    guild_id  BIGINT,
+                    role_id   BIGINT,
+                    entries   INT DEFAULT 1,
+                    PRIMARY KEY (guild_id, role_id)
+                )""",
                 'ALTER TABLE invite_stats ADD COLUMN IF NOT EXISTS verified INT DEFAULT 0',
             ]:
                 try:
@@ -889,6 +920,7 @@ async def claim_cmd(ctx):
         f'`$transfer @user` — hand off to another staff\n'
         f'`$close` — close & save transcript'
     )
+    e.set_footer(text=f'Claimed by {ctx.author.display_name}')
     await ctx.send(embed=e)
 
 
@@ -975,6 +1007,7 @@ async def rename_cmd(ctx, *, new_name: str = None):
     await ctx.channel.edit(name=f'ticket-{safe}')
     e = discord.Embed(color=0x57F287)
     e.description = f'✅ renamed by {ctx.author.mention}\n`{old_name}` → `ticket-{safe}`'
+    e.set_footer(text=f'Renamed by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1009,6 +1042,7 @@ async def transfer_cmd(ctx, member: discord.Member = None):
         f'**From:** {ctx.author.mention}\n'
         f'**To:** {member.mention}'
     )
+    e.set_footer(text=f'Transferred by {ctx.author.display_name}')
     await ctx.send(embed=e)
 
 
@@ -1043,6 +1077,7 @@ async def proof_cmd(ctx):
     await proof_ch.send(embed=e)
     e = discord.Embed(color=0x57F287)
     e.description = f'✅ trade proof posted to {proof_ch.mention}'
+    e.set_footer(text=f'Posted by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1121,10 +1156,12 @@ async def channelperm_cmd(ctx, channel: discord.TextChannel = None, target: str 
     await channel.set_permissions(resolved_target, overwrite=ow)
     action = '✅ enabled' if resolved_toggle else '🚫 disabled'
     name   = resolved_target.name if hasattr(resolved_target, 'name') else str(resolved_target)
-    await ctx.reply(embed=discord.Embed(
+    e = discord.Embed(
         description=f'{action} `{resolved_perm}` for **{name}** in {channel.mention}',
         color=0x57F287 if resolved_toggle else 0xED4245
-    ))
+    )
+    e.set_footer(text=f'Set by {ctx.author.display_name}')
+    await ctx.reply(embed=e)
 
 
 @bot.command(name='channelpermall')
@@ -1236,6 +1273,7 @@ async def setcategory_cmd(ctx, category: discord.CategoryChannel = None):
         )
     e = discord.Embed(color=0x57F287)
     e.description = f'✅ ticket category set to **{category.name}**\nnew tickets will be created here'
+    e.set_footer(text=f'Set by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1251,6 +1289,7 @@ async def setlogs_cmd(ctx, channel: discord.TextChannel = None):
         )
     e = discord.Embed(color=0x57F287)
     e.description = f'✅ log channel set to {channel.mention}\nticket transcripts and events will be logged here'
+    e.set_footer(text=f'Set by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1287,8 +1326,8 @@ async def config_cmd(ctx):
     e.add_field(name='🟢 Verified Role',   value=verified_r.mention   if verified_r   else 'not found', inline=True)
     e.add_field(name='👥 Member Role',     value=member_r.mention     if member_r     else 'not found', inline=True)
 
-    if not cfg:
-        e.set_footer(text='run $setcategory and $setlogs to finish setup')
+    footer = 'run $setcategory and $setlogs to finish setup' if not cfg else f'Requested by {ctx.author.display_name}'
+    e.set_footer(text=footer)
     await ctx.reply(embed=e)
 
 
@@ -1298,6 +1337,7 @@ async def lock_cmd(ctx):
     tickets_locked[ctx.guild.id] = True
     e = discord.Embed(color=0xED4245)
     e.description = f'🔒 **tickets locked** by {ctx.author.mention}\nnobody can open new tickets until `$unlock` is run'
+    e.set_footer(text=f'Locked by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1307,6 +1347,7 @@ async def unlock_cmd(ctx):
     tickets_locked[ctx.guild.id] = False
     e = discord.Embed(color=0x57F287)
     e.description = f'🔓 **tickets unlocked** by {ctx.author.mention} — members can open tickets again'
+    e.set_footer(text=f'Unlocked by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1326,6 +1367,7 @@ async def blacklist_cmd(ctx, member: discord.Member = None, *, reason: str = 'no
     e.add_field(name='By',     value=ctx.author.mention,           inline=True)
     e.add_field(name='Reason', value=reason,                       inline=False)
     e.set_thumbnail(url=member.display_avatar.url)
+    e.set_footer(text=f'Blacklisted by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1338,7 +1380,10 @@ async def unblacklist_cmd(ctx, member: discord.Member = None):
         result = await c.execute('DELETE FROM blacklist WHERE user_id = $1 AND guild_id = $2', member.id, ctx.guild.id)
     if result == 'DELETE 0':
         return await ctx.reply(embed=discord.Embed(description=f"⚠️ {member.mention} isn't blacklisted", color=0xFEE75C))
-    await ctx.reply(embed=discord.Embed(description=f'✅ {member.mention} removed from the blacklist', color=0x57F287))
+    e = discord.Embed(color=0x57F287)
+    e.description = f'✅ {member.mention} removed from the blacklist'
+    e.set_footer(text=f'Removed by {ctx.author.display_name}')
+    await ctx.reply(embed=e)
 
 
 @bot.command(name='blacklists')
@@ -1357,6 +1402,7 @@ async def blacklists_cmd(ctx):
         lines.append(f"**{name}** — {r['reason']}  *(by {by.display_name if by else '?'} on {date})*")
     e = discord.Embed(title=f'🚫 Blacklist  •  {len(rows)} user{"s" if len(rows) > 1 else ""}', color=0xED4245)
     e.description = '\n'.join(lines)
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1455,6 +1501,7 @@ async def clearinvites_cmd(ctx, target: str = None):
             )
         e = discord.Embed(color=0x57F287)
         e.description = f'✅ all invite stats reset for **{ctx.guild.name}**\neveryone starts from 0'
+        e.set_footer(text=f'Cleared by {ctx.author.display_name}')
         await ctx.reply(embed=e)
         return
 
@@ -1472,10 +1519,9 @@ async def clearinvites_cmd(ctx, target: str = None):
             'DELETE FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
             ctx.guild.id, member.id
         )
-    await ctx.reply(embed=discord.Embed(
-        description=f'✅ invite stats cleared for {member.mention}',
-        color=0x57F287
-    ))
+    e = discord.Embed(color=0x57F287)
+    e.description = f'✅ invite stats cleared for {member.mention}\ntheir joins, leaves, fakes and rejoins are all reset to 0'
+    await ctx.reply(embed=e)
 
 
 # ================================================================== utility commands
@@ -1523,6 +1569,7 @@ async def membercount_cmd(ctx):
     e.add_field(name='🧑 Humans',  value=str(humans), inline=True)
     e.add_field(name='🤖 Bots',    value=str(bots),   inline=True)
     e.add_field(name='🟢 Online',  value=str(online), inline=True)
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1536,9 +1583,11 @@ async def newest_cmd(ctx):
     e = discord.Embed(title='🆕 Newest Members', color=0x57F287)
     lines = []
     for i, m in enumerate(members, 1):
-        joined = m.joined_at.strftime('%b %d, %Y') if m.joined_at else '?'
-        lines.append(f'**{i}.** {m.mention}  •  joined {joined}')
+        joined  = m.joined_at.strftime('%b %d, %Y') if m.joined_at else '?'
+        created = m.created_at.strftime('%b %d, %Y') if m.created_at else '?'
+        lines.append(f'**{i}.** {m.mention}  •  joined {joined}  •  acc created {created}')
     e.description = '\n'.join(lines)
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1551,9 +1600,11 @@ async def oldest_cmd(ctx):
     e = discord.Embed(title='🏅 Longest Standing Members', color=0xF1C40F)
     lines = []
     for i, m in enumerate(members, 1):
-        joined = m.joined_at.strftime('%b %d, %Y') if m.joined_at else '?'
-        lines.append(f'**{i}.** {m.mention}  •  joined {joined}')
+        joined  = m.joined_at.strftime('%b %d, %Y') if m.joined_at else '?'
+        created = m.created_at.strftime('%b %d, %Y') if m.created_at else '?'
+        lines.append(f'**{i}.** {m.mention}  •  joined {joined}  •  acc created {created}')
     e.description = '\n'.join(lines)
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1568,13 +1619,14 @@ async def botlist_cmd(ctx):
     lines = [f'**{i}.** {b.mention}  •  `{b.name}`' for i, b in enumerate(bots, 1)]
     e = discord.Embed(title=f'🤖 Bots in {ctx.guild.name}  •  {len(bots)} total', color=0x5865F2)
     e.description = '\n'.join(lines)
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
 
 HELP_PAGES = [
     {
-        'title': '📋 Commands  •  Page 1 / 5',
+        'title': '📋 Commands  •  Page 1 / 6',
         'name':  '🎫 Tickets  •  Staff & Middleman',
         'value': (
             '`$claim`                  claim a ticket\n'
@@ -1588,7 +1640,7 @@ HELP_PAGES = [
         ),
     },
     {
-        'title': '📋 Commands  •  Page 2 / 5',
+        'title': '📋 Commands  •  Page 2 / 6',
         'name':  '🔧 Staff Tools',
         'value': (
             '`$channelperm #ch @target perm on/off`\n'
@@ -1600,7 +1652,7 @@ HELP_PAGES = [
         ),
     },
     {
-        'title': '📋 Commands  •  Page 3 / 5',
+        'title': '📋 Commands  •  Page 3 / 6',
         'name':  '🔍 Utility  •  Everyone',
         'value': (
             '`$snipe` / `$sn`             last deleted message in channel\n'
@@ -1611,7 +1663,7 @@ HELP_PAGES = [
         ),
     },
     {
-        'title': '📋 Commands  •  Page 4 / 5',
+        'title': '📋 Commands  •  Page 4 / 6',
         'name':  '📨 Invites  •  Everyone',
         'value': (
             '`$invites [@user]`              view invite stats\n'
@@ -1621,7 +1673,7 @@ HELP_PAGES = [
         ),
     },
     {
-        'title': '📋 Commands  •  Page 5 / 5',
+        'title': '📋 Commands  •  Page 5 / 6',
         'name':  '⚙️ Setup  •  Owner Only',
         'value': (
             '`$setup`               post ticket panel\n'
@@ -1634,6 +1686,21 @@ HELP_PAGES = [
             '`$blacklist @user`     blacklist from tickets\n'
             '`$unblacklist @user`   remove from blacklist\n'
             '`$blacklists`          view all blacklisted users'
+        ),
+    },
+    {
+        'title': '📋 Commands  •  Page 6 / 6',
+        'name':  '🎉 Giveaways  •  Slash Commands',
+        'value': (
+            '`/giveaway create`         create a giveaway\n'
+            '→ `duration` `winners` `prize` `channel` `host` `image` `required_role`\n\n'
+            '`/giveaway end`            end a giveaway early\n'
+            '`/giveaway reroll`         reroll a new winner\n'
+            '`/giveaway addentries`     add a bonus entry role\n'
+            '`/giveaway removeentries`  remove a bonus entry role\n\n'
+            '**Entries:** everyone gets 1 base entry\n'
+            'Bonus roles stack to highest tier only\n'
+            'Required role = no entry without it'
         ),
     },
 ]
@@ -2044,11 +2111,588 @@ async def setupverify_cmd(ctx):
         pass
 
 
+# ================================================================== giveaway system
+
+def parse_duration(s: str) -> int:
+    s = s.strip().lower()
+    units = {'d': 86400, 'h': 3600, 'm': 60, 's': 1}
+    for unit, mult in units.items():
+        if s.endswith(unit):
+            try:
+                return int(s[:-1]) * mult
+            except ValueError:
+                return 0
+    try:
+        return int(s) * 60
+    except ValueError:
+        return 0
+
+
+def format_end_date(dt: datetime) -> str:
+    return dt.strftime('%m/%d/%Y')
+
+
+def format_time_left(dt: datetime) -> str:
+    now  = datetime.now(timezone.utc)
+    diff = dt - now
+    if diff.total_seconds() <= 0:
+        return 'ended'
+    d = diff.days
+    h, rem = divmod(diff.seconds, 3600)
+    m, _   = divmod(rem, 60)
+    if d > 0:   return f'in {d}d {h}h'
+    if h > 0:   return f'in {h}h {m}m'
+    return f'in {m}m'
+
+
+async def get_entry_count(member: discord.Member, bonus_roles: list) -> int:
+    best = 0
+    for role_id, entries in bonus_roles:
+        if member.get_role(role_id):
+            best = max(best, entries)
+    return 1 + best
+
+
+async def build_giveaway_embed(prize, winners, host, ends_at, required_role, image, bonus_roles, guild=None):
+    e = discord.Embed(title=f'🎉 {prize}', color=0x2ECC71)
+    e.description = (
+        f'Click 🎉 to enter!\n'
+        f'**Winners:** {winners}\n'
+        f'**Hosted by:** {host.mention}\n'
+        f'**Ends:** {format_time_left(ends_at)}'
+    )
+    if bonus_roles and guild:
+        lines = []
+        for role_id, entries in bonus_roles:
+            r = guild.get_role(role_id)
+            if r:
+                lines.append(f'{r.mention}: **{entries}** entries')
+        if lines:
+            e.add_field(name='**Extra Entries:**', value='\n'.join(lines), inline=False)
+    if required_role:
+        e.add_field(name='\u200b', value=f'Must have the role: {required_role.mention}', inline=False)
+    if image:
+        e.set_image(url=image)
+    e.set_footer(text=f'Ends at | {format_end_date(ends_at)}')
+    return e
+
+
+class GiveawayEntryView(View):
+    def __init__(self, giveaway_id: int):
+        super().__init__(timeout=None)
+        self.giveaway_id = giveaway_id
+        self.enter_btn.custom_id = f'gw_enter:{giveaway_id}'
+        self.parts_btn.custom_id = f'gw_parts:{giveaway_id}'
+
+    @discord.ui.button(label='0', emoji='🎉', style=ButtonStyle.primary, custom_id='gw_enter:0')
+    async def enter_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gw_id = int(button.custom_id.split(':')[1])
+        async with db.pool.acquire() as c:
+            gw = await c.fetchrow('SELECT * FROM giveaways WHERE id=$1', gw_id)
+            if not gw or gw['ended']:
+                return await interaction.response.send_message(
+                    embed=discord.Embed(description='❌ this giveaway has ended', color=0xED4245),
+                    ephemeral=True
+                )
+            if gw['required_role_id']:
+                if not interaction.user.get_role(gw['required_role_id']):
+                    role = interaction.guild.get_role(gw['required_role_id'])
+                    return await interaction.response.send_message(
+                        embed=discord.Embed(
+                            description=f'❌ you need {role.mention if role else "a required role"} to enter',
+                            color=0xED4245
+                        ),
+                        ephemeral=True
+                    )
+            existing = await c.fetchrow(
+                'SELECT 1 FROM giveaway_entries WHERE giveaway_id=$1 AND user_id=$2',
+                gw_id, interaction.user.id
+            )
+            if existing:
+                await c.execute(
+                    'DELETE FROM giveaway_entries WHERE giveaway_id=$1 AND user_id=$2',
+                    gw_id, interaction.user.id
+                )
+                count = await c.fetchval(
+                    'SELECT COUNT(DISTINCT user_id) FROM giveaway_entries WHERE giveaway_id=$1', gw_id
+                )
+                button.label = str(count)
+                await interaction.response.edit_message(view=self)
+                return await interaction.followup.send(
+                    embed=discord.Embed(description='↩️ you left the giveaway', color=0xFEE75C),
+                    ephemeral=True
+                )
+            bonus_rows  = await c.fetch(
+                'SELECT role_id, entries FROM giveaway_bonus_roles WHERE guild_id=$1', interaction.guild_id
+            )
+            bonus_roles = [(r['role_id'], r['entries']) for r in bonus_rows]
+            total       = await get_entry_count(interaction.user, bonus_roles)
+            for _ in range(total):
+                await c.execute(
+                    'INSERT INTO giveaway_entries (giveaway_id, user_id) VALUES ($1,$2)',
+                    gw_id, interaction.user.id
+                )
+            count = await c.fetchval(
+                'SELECT COUNT(DISTINCT user_id) FROM giveaway_entries WHERE giveaway_id=$1', gw_id
+            )
+        button.label = str(count)
+        await interaction.response.edit_message(view=self)
+        msg = f'🎉 you entered with **{total}** entr{"y" if total == 1 else "ies"}!'
+        await interaction.followup.send(
+            embed=discord.Embed(description=msg, color=0x57F287), ephemeral=True
+        )
+
+    @discord.ui.button(label='Participants', emoji='👥', style=ButtonStyle.secondary, custom_id='gw_parts:0')
+    async def parts_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gw_id = int(button.custom_id.split(':')[1])
+        async with db.pool.acquire() as c:
+            rows = await c.fetch(
+                'SELECT DISTINCT user_id FROM giveaway_entries WHERE giveaway_id=$1', gw_id
+            )
+        if not rows:
+            return await interaction.response.send_message(
+                embed=discord.Embed(description='nobody has entered yet', color=0x5865F2), ephemeral=True
+            )
+        mentions = [f'<@{r["user_id"]}>' for r in rows]
+        # split into pages of 20 per page
+        per_page = 20
+        pages    = [mentions[i:i+per_page] for i in range(0, len(mentions), per_page)]
+        total    = len(mentions)
+
+        def make_page(idx):
+            e = discord.Embed(
+                title=f'👥 Participants — {total}  •  Page {idx+1}/{len(pages)}',
+                color=0x5865F2
+            )
+            e.description = '  '.join(pages[idx])
+            return e
+
+        class PartsView(View):
+            def __init__(self):
+                super().__init__(timeout=60)
+                self.page = 0
+                self._sync()
+
+            def _sync(self):
+                self.prev.disabled = self.page == 0
+                self.nxt.disabled  = self.page == len(pages) - 1
+
+            @discord.ui.button(label='◀', style=ButtonStyle.gray)
+            async def prev(self, inter: discord.Interaction, _):
+                if inter.user.id != interaction.user.id:
+                    return await inter.response.send_message('❌ not your menu', ephemeral=True)
+                self.page -= 1
+                self._sync()
+                await inter.response.edit_message(embed=make_page(self.page), view=self)
+
+            @discord.ui.button(label='▶', style=ButtonStyle.gray)
+            async def nxt(self, inter: discord.Interaction, _):
+                if inter.user.id != interaction.user.id:
+                    return await inter.response.send_message('❌ not your menu', ephemeral=True)
+                self.page += 1
+                self._sync()
+                await inter.response.edit_message(embed=make_page(self.page), view=self)
+
+            async def on_timeout(self):
+                try:
+                    for item in self.children:
+                        item.disabled = True
+                    await self.message.edit(view=self)
+                except Exception:
+                    pass
+
+        if len(pages) == 1:
+            # fits on one page — no buttons needed
+            return await interaction.response.send_message(
+                embed=make_page(0), ephemeral=True
+            )
+        view         = PartsView()
+        view.message = await interaction.response.send_message(
+            embed=make_page(0), view=view, ephemeral=True
+        )
+
+
+async def end_giveaway(giveaway_id: int, guild: discord.Guild):
+    async with db.pool.acquire() as c:
+        gw = await c.fetchrow('SELECT * FROM giveaways WHERE id=$1', giveaway_id)
+        if not gw or gw['ended']:
+            return
+        await c.execute('UPDATE giveaways SET ended=TRUE WHERE id=$1', giveaway_id)
+        entries = await c.fetch('SELECT user_id FROM giveaway_entries WHERE giveaway_id=$1', giveaway_id)
+
+    channel = guild.get_channel(gw['channel_id'])
+    if not channel:
+        return
+    try:
+        msg = await channel.fetch_message(gw['message_id'])
+    except Exception:
+        return
+
+    if not entries:
+        e = discord.Embed(title=f'🎉 {gw["prize"]}', description='Giveaway ended — no entries!', color=0xED4245)
+        await msg.edit(embed=e, view=None)
+        await channel.send(embed=discord.Embed(description=f'🎉 **{gw["prize"]}** ended with no entries.', color=0xED4245))
+        return
+
+    pool         = [r['user_id'] for r in entries]  # weighted pool (dupes = more entries)
+    unique_users = list(set(pool))
+    num_win      = min(gw['winners_count'], len(unique_users))
+
+    # ── NUCLEAR RANDOM WINNER SELECTION ────────────────────────────
+    import secrets, hashlib, time, os, struct
+
+    def nuke_seed(ref_list):
+        parts = [
+            os.urandom(64),
+            str(time.time_ns()).encode(),
+            str(time.perf_counter_ns()).encode(),
+            secrets.token_bytes(64),
+            struct.pack('>Q', id(ref_list)),
+            struct.pack('>Q', id(time.time)),
+            hashlib.sha256(''.join(str(u) for u in ref_list).encode()).digest(),
+        ]
+        h = b''.join(parts)
+        for _ in range(3):
+            h = hashlib.sha512(h + os.urandom(32)).digest()
+        return int.from_bytes(h, 'big')
+
+    # fetch last winners — no back-to-back
+    async with db.pool.acquire() as c:
+        last_row = await c.fetchrow(
+            """SELECT winner_ids FROM giveaway_last_winners
+               WHERE guild_id=$1 AND prize=$2""",
+            gw['guild_id'], gw['prize']
+        )
+    last_winners = set(last_row['winner_ids']) if last_row else set()
+    eligible     = [u for u in unique_users if u not in last_winners]
+    if len(eligible) < num_win:
+        eligible = unique_users
+
+    weighted = [u for u in pool if u in set(eligible)]
+    if not weighted:
+        weighted = list(pool)
+
+    # 7 Fisher-Yates passes, nuclear seed each pass
+    for _ in range(7):
+        rng = random.Random(nuke_seed(weighted))
+        for i in range(len(weighted) - 1, 0, -1):
+            j = rng.randint(0, i)
+            weighted[i], weighted[j] = weighted[j], weighted[i]
+
+    # rotate by random offset so position-0 bias is impossible
+    pick_rng = random.Random(nuke_seed(weighted))
+    offset   = pick_rng.randint(0, max(len(weighted) - 1, 0))
+    rotated  = weighted[offset:] + weighted[:offset]
+
+    winners = []
+    used    = set()
+    for u in rotated:
+        if u not in used:
+            winners.append(u)
+            used.add(u)
+        if len(winners) == num_win:
+            break
+    if len(winners) < num_win:
+        for u in unique_users:
+            if u not in used:
+                winners.append(u)
+                used.add(u)
+            if len(winners) == num_win:
+                break
+
+    # store winners for back-to-back prevention
+    async with db.pool.acquire() as c:
+        await c.execute(
+            """INSERT INTO giveaway_last_winners (guild_id, prize, winner_ids)
+               VALUES ($1,$2,$3)
+               ON CONFLICT (guild_id, prize) DO UPDATE SET winner_ids=$3""",
+            gw['guild_id'], gw['prize'], winners
+        )
+
+    e = discord.Embed(title=f'🎉 {gw["prize"]}', color=0xF1C40F)
+    e.description = f'**Winner{"s" if num_win > 1 else ""}:** {mentions}'
+    e.set_footer(text='Giveaway ended')
+    dead_view = GiveawayEntryView(giveaway_id)
+    for item in dead_view.children:
+        item.disabled = True
+    await msg.edit(embed=e, view=dead_view)
+    await channel.send(
+        content=mentions,
+        embed=discord.Embed(
+            description=f'🎉 Congratulations {mentions}! You won **{gw["prize"]}**!',
+            color=0xF1C40F
+        )
+    )
+
+
+async def schedule_giveaway(giveaway_id: int, ends_at: datetime, guild: discord.Guild):
+    delay = (ends_at - datetime.now(timezone.utc)).total_seconds()
+    if delay > 0:
+        await asyncio.sleep(delay)
+    await end_giveaway(giveaway_id, guild)
+
+
+# ── slash command group ───────────────────────────────────────────
+
+giveaway_group = app_commands.Group(name='giveaway', description='Giveaway commands')
+
+
+@giveaway_group.command(name='create', description='Create a giveaway')
+@app_commands.describe(
+    duration='How long the giveaway lasts (e.g. 10d, 2h, 30m)',
+    winners='Number of winners',
+    prize='What is being given away',
+    channel='Channel to post in (default: current)',
+    host='Who is hosting (default: you)',
+    image='Image URL to attach',
+    required_role='Role required to enter',
+)
+async def giveaway_create(
+    interaction: discord.Interaction,
+    duration: str,
+    winners: int,
+    prize: str,
+    channel: discord.TextChannel = None,
+    host: discord.Member = None,
+    image: str = None,
+    required_role: discord.Role = None,
+):
+    if not interaction.user.guild_permissions.manage_guild and not _is_staff(interaction.user):
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ you need staff or Manage Server to create giveaways', color=0xED4245),
+            ephemeral=True
+        )
+    secs = parse_duration(duration)
+    if not secs:
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ invalid duration — use formats like `10d`, `2h`, `30m`', color=0xED4245),
+            ephemeral=True
+        )
+    if winners < 1:
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ winners must be at least 1', color=0xED4245),
+            ephemeral=True
+        )
+    channel  = channel or interaction.channel
+    host     = host or interaction.user
+    ends_at  = datetime.now(timezone.utc).replace(microsecond=0)
+    from datetime import timedelta
+    ends_at  = ends_at + timedelta(seconds=secs)
+
+    async with db.pool.acquire() as c:
+        bonus_rows  = await c.fetch(
+            'SELECT role_id, entries FROM giveaway_bonus_roles WHERE guild_id=$1', interaction.guild_id
+        )
+        bonus_roles = [(r['role_id'], r['entries']) for r in bonus_rows]
+
+    embed = await build_giveaway_embed(
+        prize, winners, host, ends_at, required_role, image, bonus_roles, guild=interaction.guild
+    )
+    await interaction.response.send_message(
+        embed=discord.Embed(description='⏳ posting giveaway...', color=0x5865F2), ephemeral=True
+    )
+    temp_view = GiveawayEntryView(0)
+    msg = await channel.send(embed=embed, view=temp_view)
+
+    async with db.pool.acquire() as c:
+        gw_id = await c.fetchval(
+            """INSERT INTO giveaways
+               (guild_id, channel_id, message_id, prize, winners_count, host_id,
+                required_role_id, image_url, ends_at, ended)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE)
+               RETURNING id""",
+            interaction.guild_id, channel.id, msg.id, prize, winners, host.id,
+            required_role.id if required_role else None, image, ends_at
+        )
+
+    real_view = GiveawayEntryView(gw_id)
+    await msg.edit(view=real_view)
+    await interaction.edit_original_response(
+        embed=discord.Embed(description=f'✅ giveaway posted in {channel.mention}', color=0x57F287)
+    )
+    asyncio.create_task(schedule_giveaway(gw_id, ends_at, interaction.guild))
+
+
+@giveaway_group.command(name='end', description='End a giveaway early')
+@app_commands.describe(message_id='The message ID of the giveaway to end')
+async def giveaway_end(interaction: discord.Interaction, message_id: str):
+    if not interaction.user.guild_permissions.manage_guild and not _is_staff(interaction.user):
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ staff only', color=0xED4245), ephemeral=True
+        )
+    try:
+        mid = int(message_id)
+    except ValueError:
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ invalid message ID', color=0xED4245), ephemeral=True
+        )
+    async with db.pool.acquire() as c:
+        gw = await c.fetchrow(
+            'SELECT * FROM giveaways WHERE message_id=$1 AND guild_id=$2', mid, interaction.guild_id
+        )
+    if not gw:
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ giveaway not found', color=0xED4245), ephemeral=True
+        )
+    if gw['ended']:
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ already ended', color=0xED4245), ephemeral=True
+        )
+    await interaction.response.send_message(
+        embed=discord.Embed(description='⏳ ending...', color=0xFEE75C), ephemeral=True
+    )
+    await end_giveaway(gw['id'], interaction.guild)
+    await interaction.edit_original_response(
+        embed=discord.Embed(description='✅ giveaway ended', color=0x57F287)
+    )
+
+
+@giveaway_group.command(name='reroll', description='Reroll a giveaway winner')
+@app_commands.describe(message_id='The message ID of the giveaway to reroll')
+async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
+    if not interaction.user.guild_permissions.manage_guild and not _is_staff(interaction.user):
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ staff only', color=0xED4245), ephemeral=True
+        )
+    try:
+        mid = int(message_id)
+    except ValueError:
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ invalid message ID', color=0xED4245), ephemeral=True
+        )
+    async with db.pool.acquire() as c:
+        gw = await c.fetchrow(
+            'SELECT * FROM giveaways WHERE message_id=$1 AND guild_id=$2', mid, interaction.guild_id
+        )
+        if not gw:
+            return await interaction.response.send_message(
+                embed=discord.Embed(description='❌ giveaway not found', color=0xED4245), ephemeral=True
+            )
+        entries = await c.fetch('SELECT user_id FROM giveaway_entries WHERE giveaway_id=$1', gw['id'])
+    if not entries:
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ no entries to reroll from', color=0xED4245), ephemeral=True
+        )
+    pool         = [r['user_id'] for r in entries]  # weighted pool (dupes = more entries)
+    unique_users = list(set(pool))
+    num_win      = min(gw['winners_count'], len(unique_users))
+
+    import secrets, hashlib, time, os, struct
+
+    def nuke_seed_r(ref_list):
+        parts = [
+            os.urandom(64),
+            str(time.time_ns()).encode(),
+            str(time.perf_counter_ns()).encode(),
+            secrets.token_bytes(64),
+            struct.pack('>Q', id(ref_list)),
+            hashlib.sha256(''.join(str(u) for u in ref_list).encode()).digest(),
+        ]
+        h = b''.join(parts)
+        for _ in range(3):
+            h = hashlib.sha512(h + os.urandom(32)).digest()
+        return int.from_bytes(h, 'big')
+
+    weighted = list(pool)
+    for _ in range(7):
+        rng = random.Random(nuke_seed_r(weighted))
+        for i in range(len(weighted) - 1, 0, -1):
+            j = rng.randint(0, i)
+            weighted[i], weighted[j] = weighted[j], weighted[i]
+
+    pick_rng = random.Random(nuke_seed_r(weighted))
+    offset   = pick_rng.randint(0, max(len(weighted) - 1, 0))
+    rotated  = weighted[offset:] + weighted[:offset]
+
+    winners = []
+    used    = set()
+    for u in rotated:
+        if u not in used:
+            winners.append(u)
+            used.add(u)
+        if len(winners) == num_win:
+            break
+    if len(winners) < num_win:
+        for u in unique_users:
+            if u not in used:
+                winners.append(u)
+                used.add(u)
+            if len(winners) == num_win:
+                break
+    mentions = ' '.join(f'<@{w}>' for w in winners)
+    channel  = interaction.guild.get_channel(gw['channel_id'])
+    if channel:
+        await channel.send(
+            content=mentions,
+            embed=discord.Embed(
+                description=f'🎲 Reroll! Congratulations {mentions}! You won **{gw["prize"]}**!',
+                color=0xF1C40F
+            )
+        )
+    await interaction.response.send_message(
+        embed=discord.Embed(description=f'✅ rerolled — new winner: {mentions}', color=0x57F287),
+        ephemeral=True
+    )
+
+
+@giveaway_group.command(name='addentries', description='Add a bonus entry role')
+@app_commands.describe(role='The role to give bonus entries', entries='Number of bonus entries')
+async def giveaway_addentries(interaction: discord.Interaction, role: discord.Role, entries: int):
+    if not interaction.user.guild_permissions.manage_guild:
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ Manage Server required', color=0xED4245), ephemeral=True
+        )
+    if entries < 1:
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ entries must be at least 1', color=0xED4245), ephemeral=True
+        )
+    async with db.pool.acquire() as c:
+        await c.execute(
+            """INSERT INTO giveaway_bonus_roles (guild_id, role_id, entries)
+               VALUES ($1,$2,$3)
+               ON CONFLICT (guild_id, role_id) DO UPDATE SET entries=$3""",
+            interaction.guild_id, role.id, entries
+        )
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            description=f'✅ {role.mention} now gives **{entries}** bonus entr{"y" if entries == 1 else "ies"}',
+            color=0x57F287
+        ),
+        ephemeral=True
+    )
+
+
+@giveaway_group.command(name='removeentries', description='Remove a bonus entry role')
+@app_commands.describe(role='The role to remove from bonus entries')
+async def giveaway_removeentries(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.manage_guild:
+        return await interaction.response.send_message(
+            embed=discord.Embed(description='❌ Manage Server required', color=0xED4245), ephemeral=True
+        )
+    async with db.pool.acquire() as c:
+        result = await c.execute(
+            'DELETE FROM giveaway_bonus_roles WHERE guild_id=$1 AND role_id=$2',
+            interaction.guild_id, role.id
+        )
+    if result == 'DELETE 0':
+        return await interaction.response.send_message(
+            embed=discord.Embed(description=f"⚠️ {role.mention} wasn't in the bonus list", color=0xFEE75C),
+            ephemeral=True
+        )
+    await interaction.response.send_message(
+        embed=discord.Embed(description=f'✅ {role.mention} removed from bonus entries', color=0x57F287),
+        ephemeral=True
+    )
+
+
 # ================================================================== events
 
 @bot.event
 async def on_ready():
     logger.info(f'logged in as {bot.user}')
+    bot.tree.add_command(giveaway_group)
+    await bot.tree.sync()
+    logger.info('slash commands synced')
 
     try:
         await db.connect()
@@ -2059,6 +2703,14 @@ async def on_ready():
     bot.add_view(ControlView())
     bot.add_view(RewardPanel())
     bot.add_view(VerifyView())
+    # re-register giveaway views for persistent buttons
+    try:
+        async with db.pool.acquire() as c:
+            active_gws = await c.fetch('SELECT id FROM giveaways WHERE ended=FALSE')
+        for gw in active_gws:
+            bot.add_view(GiveawayEntryView(gw['id']))
+    except Exception:
+        pass
 
     try:
         async with db.pool.acquire() as c:
