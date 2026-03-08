@@ -1,3 +1,4 @@
-discord.py==2.3.2
-aiohttp==3.9.1
-asyncpg==0.29.0
+discord.py
+asyncpg
+aiohttp
+Pillow

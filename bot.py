@@ -1,6 +1,7 @@
 import os
 import re
 import io
+from PIL import Image, ImageDraw, ImageFont
 import json
 import random
 import string
@@ -553,7 +554,7 @@ class RewardModal(Modal, title='Claim a Reward'):
     async def on_submit(self, interaction: discord.Interaction):
         if not limiter.check(interaction.user.id, 'open', 10):
             return await interaction.response.send_message(
-                embed=discord.Embed(description='⏳ slow down a bit, wait a few seconds', color=0xFEE75C),
+                embed=discord.Embed(description='⏳ chill for a sec', color=0xFEE75C),
                 ephemeral=True
             )
         try:
@@ -649,7 +650,7 @@ class TicketPanel(View):
     async def support(self, interaction: discord.Interaction, _):
         if not limiter.check(interaction.user.id, 'open', 10):
             return await interaction.response.send_message(
-                embed=discord.Embed(description='⏳ slow down a bit, wait a few seconds', color=0xFEE75C),
+                embed=discord.Embed(description='⏳ chill for a sec', color=0xFEE75C),
                 ephemeral=True
             )
         try:
@@ -1509,11 +1510,12 @@ async def invites_cmd(ctx, member: discord.Member = None):
             'SELECT * FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
             ctx.guild.id, member.id
         )
-    joins   = row['joins']   if row else 0
-    leaves  = row['leaves']  if row else 0
-    fake    = row['fake']    if row else 0
-    rejoins = row['rejoins'] if row else 0
-    real    = joins - leaves - fake - rejoins
+    joins    = row['joins']    if row else 0
+    leaves   = row['leaves']   if row else 0
+    fake     = row['fake']     if row else 0
+    rejoins  = row['rejoins']  if row else 0
+    verified = row['verified'] if row else 0
+    real     = joins - leaves - fake - rejoins
 
     word = 'invite' if real == 1 else 'invites'
 
@@ -1524,7 +1526,8 @@ async def invites_cmd(ctx, member: discord.Member = None):
         f'**Joins** : {joins}\n'
         f'**Left** : {leaves}\n'
         f'**Fake** : {fake}\n'
-        f'**Rejoins** : {rejoins} [7d]'
+        f'**Rejoins** : {rejoins} [7d]\n'
+        f'**Verified** : {verified}'
     )
     e.set_thumbnail(url=member.display_avatar.url)
     e.set_footer(text=f'Requested by {ctx.author.display_name}')
@@ -1620,6 +1623,7 @@ async def live_lb_loop(view: LiveLBView, guild):
 
 
 
+@bot.command(name='invited')
 async def invited_cmd(ctx, member: discord.Member = None):
     if not member:
         return await ctx.reply(embed=discord.Embed(description='usage: `$invited @user`', color=0x5865F2))
@@ -2110,6 +2114,73 @@ class VerifyView(View):
         await interaction.response.send_message(embed=e, ephemeral=True)
 
 
+FONT_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+FONT_REG  = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+
+def ordinal(n: int) -> str:
+    s = {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
+    if 11 <= n % 100 <= 13:
+        s = 'th'
+    return f'{n}{s}'
+
+def make_welcome_card(avatar_bytes: bytes, username: str, server_name: str, member_number: int) -> io.BytesIO:
+    W, H   = 800, 200
+    BG     = (15, 15, 20)
+    ACC    = (255, 255, 255)
+    SUB    = (180, 180, 180)
+    RING   = (255, 255, 255)
+
+    img  = Image.new('RGB', (W, H), BG)
+    draw = ImageDraw.Draw(img)
+
+    # subtle gradient left → right
+    for x in range(W):
+        v = int(20 * (x / W))
+        draw.line([(x, 0), (x, H)], fill=(15 + v, 15 + v, 20 + v))
+
+    # ── avatar ──────────────────────────────────────────────────────
+    AV_SIZE = 130
+    AV_X    = 35
+    AV_Y    = (H - AV_SIZE) // 2
+
+    avatar_img = Image.open(io.BytesIO(avatar_bytes)).convert('RGBA').resize((AV_SIZE, AV_SIZE))
+    mask = Image.new('L', (AV_SIZE, AV_SIZE), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, AV_SIZE - 1, AV_SIZE - 1), fill=255)
+    avatar_circ = Image.new('RGBA', (AV_SIZE, AV_SIZE), (0, 0, 0, 0))
+    avatar_circ.paste(avatar_img, mask=mask)
+
+    RING_W   = 4
+    ring_img = Image.new('RGBA', (AV_SIZE + RING_W * 2, AV_SIZE + RING_W * 2), (0, 0, 0, 0))
+    ImageDraw.Draw(ring_img).ellipse(
+        (0, 0, AV_SIZE + RING_W * 2 - 1, AV_SIZE + RING_W * 2 - 1), fill=RING
+    )
+    ring_mask = Image.new('L', ring_img.size, 0)
+    ImageDraw.Draw(ring_mask).ellipse((0, 0, ring_img.size[0] - 1, ring_img.size[1] - 1), fill=255)
+    img.paste(ring_img,    (AV_X - RING_W, AV_Y - RING_W), ring_mask)
+    img.paste(avatar_circ, (AV_X, AV_Y), mask)
+
+    # ── text ────────────────────────────────────────────────────────
+    TEXT_X   = AV_X + AV_SIZE + 30
+    CENTER_Y = H // 2
+
+    f_welcome = ImageFont.truetype(FONT_REG,  22)
+    f_name    = ImageFont.truetype(FONT_BOLD, 36)
+    f_sub     = ImageFont.truetype(FONT_REG,  20)
+
+    draw.text((TEXT_X, CENTER_Y - 52), 'Welcome',                                          font=f_welcome, fill=SUB)
+    draw.text((TEXT_X, CENTER_Y - 25), username,                                           font=f_name,    fill=ACC)
+    draw.text((TEXT_X, CENTER_Y + 18), f'to {server_name}',                               font=f_sub,     fill=SUB)
+    draw.text((TEXT_X, CENTER_Y + 44), f'you are the {ordinal(member_number)} member!',   font=f_sub,     fill=SUB)
+
+    # accent bar left of text
+    draw.rectangle([TEXT_X - 15, CENTER_Y - 55, TEXT_X - 10, CENTER_Y + 65], fill=(80, 80, 200))
+
+    buf = io.BytesIO()
+    img.save(buf, 'PNG')
+    buf.seek(0)
+    return buf
+
+
 @bot.event
 async def on_member_join(member: discord.Member):
     guild = member.guild
@@ -2122,12 +2193,15 @@ async def on_member_join(member: discord.Member):
         except Exception as ex:
             logger.error(f'on_member_join verify: {ex}')
 
-    # --- welcome message (hardcoded channel)
+    # --- welcome message with card image
     welcome_ch = guild.get_channel(WELCOME_CHANNEL)
     if welcome_ch:
         try:
+            av_bytes = await member.display_avatar.replace(size=256, format='png').read()
+            card     = make_welcome_card(av_bytes, member.display_name, guild.name, guild.member_count)
             await welcome_ch.send(
-                f'{member.mention} Welcome to **{guild.name}** Hope you enjoy ur stay 👋'
+                f'{member.mention} Welcome to **{guild.name}** Hope you enjoy ur stay 👋',
+                file=discord.File(card, filename='welcome.png')
             )
         except Exception as ex:
             logger.error(f'welcome send: {ex}')
