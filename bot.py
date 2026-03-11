@@ -446,6 +446,10 @@ async def _can_manage(ctx, ticket) -> bool:
         r = ctx.guild.get_role(ROLES[ticket['tier']])
         if r and r in ctx.author.roles:
             return True
+    if ticket.get('tier') == 'reward':
+        gw_r = ctx.guild.get_role(GW_HOST_ROLE)
+        if gw_r and gw_r in ctx.author.roles:
+            return True
     if ticket.get('claimed_by') == ctx.author.id:
         return True
     return False
@@ -519,7 +523,7 @@ def make_ticket_embed(user, tier, ticket_id, extra_fields=None, desc=None):
         name=f'{user.display_name}  •  {TIER_LABEL.get(tier, tier)}',
         icon_url=user.display_avatar.url
     )
-    e.description = desc or "hey! someone will be with you shortly — sit tight and don't ping anyone"
+    e.description = desc or '👋 hey! someone will be with you shortly\n\nplease be patient and don\'t ping anyone'
     if extra_fields:
         for name, value, inline in extra_fields:
             e.add_field(name=name, value=value, inline=inline)
@@ -530,7 +534,7 @@ def make_ticket_embed(user, tier, ticket_id, extra_fields=None, desc=None):
 async def pre_open_checks(interaction, guild, user):
     if tickets_locked.get(guild.id):
         await interaction.followup.send(
-            embed=discord.Embed(description='tickets are closed rn, check back later', color=0xED4245),
+            embed=discord.Embed(description='🔒 tickets are closed right now — check back later', color=0xED4245),
             ephemeral=True
         )
         return False
@@ -556,28 +560,22 @@ async def pre_open_checks(interaction, guild, user):
         by     = guild.get_member(bl['blacklisted_by'])
         date   = bl['created_at'].strftime('%b %d, %Y') if bl.get('created_at') else 'unknown'
         reason = bl['reason'] or 'no reason given'
-        e = discord.Embed(title='you\'re blacklisted', color=0xED4245)
-        e.add_field(name='**Reason**', value=reason,                       inline=False)
-        e.add_field(name='**By**',     value=by.mention if by else 'staff', inline=True)
-        e.add_field(name='**Date**',   value=date,                         inline=True)
-        e.set_footer(text='if you think this is wrong, dm a staff member')
+        e = discord.Embed(title='🚫 you\'re blacklisted', color=0xED4245)
+        e.add_field(name='📋 reason', value=reason,                       inline=False)
+        e.add_field(name='👤 by',     value=by.mention if by else 'staff', inline=True)
+        e.add_field(name='📅 date',   value=date,                         inline=True)
+        e.set_footer(text='dm a staff member if you think this is a mistake')
         await interaction.followup.send(embed=e, ephemeral=True)
         return False
     if real_open >= MAX_OPEN:
         await interaction.followup.send(
-            embed=discord.Embed(
-                description='you already have a ticket open — close it first',
-                color=0xFEE75C
-            ),
+            embed=discord.Embed(description='⚠️ you already have a ticket open — close it first', color=0xFEE75C),
             ephemeral=True
         )
         return False
     if not cfg or not cfg['ticket_category_id']:
         await interaction.followup.send(
-            embed=discord.Embed(
-                description="tickets aren't fully set up yet — ping a staff member",
-                color=0xFEE75C
-            ),
+            embed=discord.Embed(description="⚠️ tickets aren't fully set up yet — ping a staff member", color=0xFEE75C),
             ephemeral=True
         )
         return False
@@ -614,14 +612,14 @@ async def save_transcript(channel, ticket, closer):
         filename=f"transcript-{ticket['ticket_id']}.txt"
     )
     msg_count = len(msgs)
-    e = discord.Embed(title='Ticket Closed', color=0xED4245)
-    e.add_field(name='**Ticket**',    value=f"#{ticket['ticket_id']}",         inline=True)
-    e.add_field(name='**Type**',      value=f"{ticket['ticket_type']} / {ticket.get('tier', '-')}", inline=True)
-    e.add_field(name='**Messages**',  value=str(msg_count),                    inline=True)
-    e.add_field(name='**Opened by**', value=opener.mention if opener else '?', inline=True)
-    e.add_field(name='**Closed by**', value=closer.mention,                    inline=True)
+    e = discord.Embed(title='🔒  ticket closed', color=0xED4245)
+    e.add_field(name='🎫 ticket',    value=f"#{ticket['ticket_id']}",         inline=True)
+    e.add_field(name='📋 type',      value=f"{ticket['ticket_type']} / {ticket.get('tier', '-')}", inline=True)
+    e.add_field(name='💬 messages',  value=str(msg_count),                    inline=True)
+    e.add_field(name='👤 opened by', value=opener.mention if opener else '?', inline=True)
+    e.add_field(name='🔒 closed by', value=closer.mention,                    inline=True)
     if claimer:
-        e.add_field(name='**Claimed by**', value=claimer.mention, inline=True)
+        e.add_field(name='✋ claimed by', value=claimer.mention, inline=True)
     await lc.send(embed=e, file=file)
 
 
@@ -760,7 +758,7 @@ class MiddlemanModal(Modal, title='Middleman Request'):
                 ping += f' {tier_r.mention}'
             await channel.send(content=ping, embed=e, view=ControlView())
             await interaction.followup.send(
-                embed=discord.Embed(description=f'opened — {channel.mention}', color=0x57F287),
+                embed=discord.Embed(description=f'✅ ticket opened — {channel.mention}', color=0x57F287),
                 ephemeral=True
             )
             await send_log(guild, 'Ticket Opened',
@@ -833,13 +831,17 @@ class RewardModal(Modal, title='Claim a Reward'):
             category = guild.get_channel(cfg['ticket_category_id'])
             staff_r  = guild.get_role(ROLES['staff'])
 
+            gw_host_r = guild.get_role(GW_HOST_ROLE)
+
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(read_messages=False),
                 guild.me:           discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
                 user:               discord.PermissionOverwrite(read_messages=True, send_messages=True),
             }
             if staff_r:
-                overwrites[staff_r] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                overwrites[staff_r]   = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            if gw_host_r:
+                overwrites[gw_host_r] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
             channel = await category.create_text_channel(name=ch_name, overwrites=overwrites)
             data    = {'type': self.rtype, 'what': self.what.value, 'proof': self.proof.value}
@@ -857,9 +859,11 @@ class RewardModal(Modal, title='Claim a Reward'):
             ping = user.mention
             if staff_r:
                 ping += f' {staff_r.mention}'
+            if gw_host_r:
+                ping += f' {gw_host_r.mention}'
             await channel.send(content=ping, embed=e, view=ControlView())
             await interaction.followup.send(
-                embed=discord.Embed(description=f'opened — {channel.mention}', color=0x57F287),
+                embed=discord.Embed(description=f'✅ ticket opened — {channel.mention}', color=0x57F287),
                 ephemeral=True
             )
         except Exception as ex:
@@ -899,7 +903,7 @@ class TicketPanel(View):
     async def support(self, interaction: discord.Interaction, _):
         if not limiter.interaction_check(interaction.user.id):
             return await interaction.response.send_message(
-                embed=discord.Embed(description='you\'re clicking too fast — slow down', color=0xFEE75C),
+                embed=discord.Embed(description='⏳ you\'re clicking too fast — slow down', color=0xFEE75C),
                 ephemeral=True
             )
         if not limiter.check(interaction.user.id, 'open', 10):
@@ -1011,11 +1015,22 @@ class ControlView(View):
             return await interaction.response.send_message(
                 embed=discord.Embed(description=f'slow down — wait **{rem:.1f}s**', color=0xFEE75C), ephemeral=True
             )
-        if not _is_staff(interaction.user):
+        gw_host_r = interaction.guild.get_role(GW_HOST_ROLE)
+        is_gw_host = gw_host_r is not None and gw_host_r in interaction.user.roles
+        if not _is_staff(interaction.user) and not is_gw_host:
             return await interaction.response.send_message(
                 embed=discord.Embed(description='you need a staff role to claim tickets', color=0xED4245),
                 ephemeral=True
             )
+        # GW hosters can only claim reward tickets
+        async with db.pool.acquire() as _chk:
+            _t = await _chk.fetchrow('SELECT ticket_type, tier FROM tickets WHERE channel_id=$1', interaction.channel.id)
+        if is_gw_host and not _is_staff(interaction.user):
+            if not _t or _t.get('tier') != 'reward':
+                return await interaction.response.send_message(
+                    embed=discord.Embed(description='you can only claim reward tickets', color=0xED4245),
+                    ephemeral=True
+                )
         async with db.pool.acquire() as c:
             ticket = await c.fetchrow(
                 'SELECT * FROM tickets WHERE channel_id = $1', interaction.channel.id
@@ -1046,10 +1061,10 @@ class ControlView(View):
         await claim_lock(interaction.channel, interaction.user, creator, ticket['ticket_type'])
         e = discord.Embed(color=0x57F287)
         e.description = (
-            f'{interaction.user.mention} has this one\n\n'
-            f'`$add @user` to bring someone in\n'
-            f'`$transfer @user` to hand it off\n'
-            f'`$close` when you\'re done'
+            f'✅ **{interaction.user.mention}** has this one\n\n'
+            f'`$add @user` — bring someone in\n'
+            f'`$transfer @user` — hand it off\n'
+            f'`$close` — wrap it up'
         )
         e.set_footer(text=f'claimed by {interaction.user.display_name}')
         await interaction.response.send_message(embed=e)
@@ -1102,7 +1117,7 @@ class ControlView(View):
         old = interaction.guild.get_member(ticket['claimed_by'])
         await claim_unlock(interaction.channel, old, ticket['ticket_type'])
         e = discord.Embed(color=0x5865F2)
-        e.description = f'{interaction.user.mention} dropped this — up for grabs again'
+        e.description = f'↩️ **{interaction.user.mention}** dropped this — up for grabs again'
         await interaction.response.send_message(embed=e)
 
 
@@ -1133,7 +1148,7 @@ class CloseConfirm(View):
                     interaction.guild.id, self.ticket['claimed_by']
                 )
         e = discord.Embed(color=0xED4245)
-        e.description = f'closing #{self.ticket["ticket_id"]} — saving transcript...'
+        e.description = f'🔒 closing ticket **#{self.ticket["ticket_id"]}** — saving transcript...'
         await interaction.message.edit(embed=e, view=None)
         await save_transcript(interaction.channel, self.ticket, interaction.user)
         await asyncio.sleep(0.5)
@@ -1148,13 +1163,13 @@ class CloseConfirm(View):
             )
         await interaction.response.defer()
         e = discord.Embed(color=0x5865F2)
-        e.description = 'nevermind, ticket stays open'
+        e.description = '↩️ nevermind — ticket stays open'
         await interaction.message.edit(embed=e, view=None)
 
     async def on_timeout(self):
         try:
             e = discord.Embed(color=0x5865F2)
-            e.description = 'close request expired — run `$close` again if you still need it'
+            e.description = '⏰ close request timed out — run `$close` again if you still need it'
             await self.msg.edit(embed=e, view=None)
         except Exception:
             pass
@@ -1188,7 +1203,7 @@ async def close_cmd(ctx):
     if is_mm and not ticket.get('claimed_by') and not is_staff:
         return await ctx.reply(embed=discord.Embed(description='you need a staff role to close tickets', color=0xED4245))
     e = discord.Embed(color=0xFEE75C)
-    e.description = f'close ticket **#{ticket["ticket_id"]}**? this will delete the channel and save a transcript'
+    e.description = f'🔒 close ticket **#{ticket["ticket_id"]}**?\nthis will **delete the channel** and save a transcript'
     view = CloseConfirm(ctx, ticket)
     view.msg = await ctx.send(embed=e, view=view)
 
@@ -1223,10 +1238,10 @@ async def claim_cmd(ctx):
     await claim_lock(ctx.channel, ctx.author, creator, ticket['ticket_type'])
     e = discord.Embed(color=0x57F287)
     e.description = (
-        f'{ctx.author.mention} has this one\n\n'
-        f'`$add @user` to bring someone in\n'
-        f'`$transfer @user` to hand it off\n'
-        f'`$close` when you\'re done'
+        f'✅ **{ctx.author.mention}** has this one\n\n'
+        f'`$add @user` — bring someone in\n'
+        f'`$transfer @user` — hand it off\n'
+        f'`$close` — wrap it up'
     )
     e.set_footer(text=f'claimed by {ctx.author.display_name}')
     await ctx.send(embed=e)
@@ -1257,7 +1272,7 @@ async def unclaim_cmd(ctx):
     old = ctx.guild.get_member(ticket['claimed_by'])
     await claim_unlock(ctx.channel, old, ticket['ticket_type'])
     e = discord.Embed(color=0x5865F2)
-    e.description = f'{ctx.author.mention} dropped this — anyone eligible can grab it'
+    e.description = f'↩️ **{ctx.author.mention}** dropped this — anyone eligible can grab it'
     await ctx.send(embed=e)
 
 
@@ -1278,7 +1293,7 @@ async def add_cmd(ctx, member: discord.Member = None):
         return await ctx.reply(embed=discord.Embed(description="only the claimer can add people", color=0xED4245))
     await ctx.channel.set_permissions(member, read_messages=True, send_messages=True)
     e = discord.Embed(color=0x57F287)
-    e.description = f'{member.mention} can now see and talk in this ticket'
+    e.description = f'✅ {member.mention} was added to this ticket'
     e.set_footer(text=f'added by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -1295,8 +1310,8 @@ async def remove_cmd(ctx, member: discord.Member = None):
     if not ticket or not await _can_manage(ctx, ticket):
         return await ctx.reply(embed=discord.Embed(description="you can't manage this ticket", color=0xED4245))
     await ctx.channel.set_permissions(member, overwrite=None)
-    e = discord.Embed(color=0x57F287)
-    e.description = f'{member.mention} was removed from this ticket'
+    e = discord.Embed(color=0xED4245)
+    e.description = f'🚪 {member.mention} was removed from this ticket'
     e.set_footer(text=f'removed by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -1316,8 +1331,8 @@ async def rename_cmd(ctx, *, new_name: str = None):
     old_name = ctx.channel.name
     await ctx.channel.edit(name=f'ticket-{safe}')
     e = discord.Embed(color=0x57F287)
-    e.description = f'`{old_name}` → `ticket-{safe}`'
-    e.set_footer(text=f'Renamed by {ctx.author.display_name}')
+    e.description = f'✏️ `{old_name}` → `ticket-{safe}`'
+    e.set_footer(text=f'renamed by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1347,7 +1362,7 @@ async def transfer_cmd(ctx, member: discord.Member = None):
         await ctx.channel.set_permissions(member, read_messages=True, send_messages=True)
         await c.execute("UPDATE tickets SET claimed_by=$1, status='claimed' WHERE ticket_id=$2", member.id, ticket['ticket_id'])
     e = discord.Embed(color=0x57F287)
-    e.description = f'{ctx.author.mention} passed this to {member.mention}'
+    e.description = f'🔄 **{ctx.author.mention}** passed this ticket to **{member.mention}**'
     e.set_footer(text=f'transferred by {ctx.author.display_name}')
     await ctx.send(embed=e)
 
@@ -1365,24 +1380,24 @@ async def proof_cmd(ctx):
     if not proof_ch:
         return await ctx.reply(embed=discord.Embed(description='proof channel not found, ping staff', color=0xED4245))
     opener = ctx.guild.get_member(ticket['user_id'])
-    e = discord.Embed(title='trade completed ✓', color=0x57F287)
-    e.add_field(name='**Middleman**', value=ctx.author.mention,                                inline=True)
-    e.add_field(name='**Tier**',      value=TIER_LABEL.get(ticket.get('tier'), 'unknown'),     inline=True)
-    e.add_field(name='**Client**',    value=opener.mention if opener else 'unknown',           inline=True)
+    e = discord.Embed(title='✅  trade completed', color=0x57F287)
+    e.add_field(name='⚖️ middleman', value=ctx.author.mention,                                inline=True)
+    e.add_field(name='📊 tier',      value=TIER_LABEL.get(ticket.get('tier'), 'unknown'),     inline=True)
+    e.add_field(name='👤 client',    value=opener.mention if opener else 'unknown',           inline=True)
     if ticket.get('trade_details'):
         try:
             d = ticket['trade_details'] if isinstance(ticket['trade_details'], dict) else json.loads(ticket['trade_details'])
-            e.add_field(name='**Trading with**', value=d.get('trader', '?'),    inline=False)
-            e.add_field(name='**Gave**',         value=d.get('giving', '?'),    inline=True)
-            e.add_field(name='**Received**',     value=d.get('receiving', '?'), inline=True)
+            e.add_field(name='🤝 trading with', value=d.get('trader', '?'),    inline=False)
+            e.add_field(name='📤 gave',         value=d.get('giving', '?'),    inline=True)
+            e.add_field(name='📥 received',     value=d.get('receiving', '?'), inline=True)
             if d.get('tip'):
-                e.add_field(name='**Tip**', value=d['tip'], inline=True)
+                e.add_field(name='💰 tip', value=d['tip'], inline=True)
         except Exception:
             pass
     e.set_footer(text=f'ticket #{ticket["ticket_id"]}')
     await proof_ch.send(embed=e)
     e2 = discord.Embed(color=0x57F287)
-    e2.description = f'proof posted in {proof_ch.mention}'
+    e2.description = f'✅ proof posted in {proof_ch.mention}'
     e2.set_footer(text=f'posted by {ctx.author.display_name}')
     await ctx.reply(embed=e2)
 
@@ -1511,13 +1526,13 @@ async def channelperm_cmd(ctx, channel: discord.TextChannel = None, target: str 
     except AttributeError:
         return await ctx.reply(embed=discord.Embed(description=f'`{perm}` isn\'t a valid perm', color=0xED4245))
     await channel.set_permissions(resolved_target, overwrite=ow)
-    action = 'enabled' if resolved_toggle else 'disabled'
+    action = '✅ enabled' if resolved_toggle else '❌ disabled'
     name   = resolved_target.name if hasattr(resolved_target, 'name') else str(resolved_target)
     e = discord.Embed(
-        description=f'`{resolved_perm}` {action} for **{name}** in {channel.mention}',
+        description=f'{action} `{resolved_perm}` for **{name}** in {channel.mention}',
         color=0x57F287 if resolved_toggle else 0xED4245
     )
-    e.set_footer(text=f'Set by {ctx.author.display_name}')
+    e.set_footer(text=f'set by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1556,9 +1571,10 @@ async def channelpermall_cmd(ctx, target: str = None, perm: str = None, toggle: 
         except Exception:
             failed += 1
 
-    result = f'`{resolved_perm}` {action} for **{name}** in all channels'
+    action_str = '✅ enabled' if resolved_toggle else '❌ disabled'
+    result = f'{action_str} `{resolved_perm}` for **{name}** across all channels'
     if failed:
-        result += f'\n{failed} channel(s) failed — check bot permissions'
+        result += f'\n⚠️ {failed} channel(s) failed — check my permissions'
     await msg.edit(embed=discord.Embed(
         description=result,
         color=0x57F287 if resolved_toggle else 0xED4245
@@ -1571,19 +1587,19 @@ async def channelpermall_cmd(ctx, target: str = None, perm: str = None, toggle: 
 @owner_only()
 async def setup_cmd(ctx):
     e = discord.Embed(color=TIER_COLOR['support'])
-    e.set_author(name="Trial's Cross Trade  •  tickets")
+    e.set_author(name="Trial's Cross Trade", icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
     e.description = (
-        '## Need help? open a ticket below\n\n'
-        '**Support**\n'
-        'general questions, reports, partnerships, anything really\n\n'
-        '**Middleman**\n'
+        '## 🎫 need help? open a ticket below\n\n'
+        '🎭 **Support**\n'
+        'general questions, reports, appeals, anything really\n\n'
+        '⚖️ **Middleman**\n'
         'need a trusted mm for your trade? we got you\n'
-        'pick your tier and a staff member will handle it\n\n'
-        '**Claim Reward**\n'
-        'won a giveaway or hit an invite milestone?\n'
-        'have your proof ready and we\'ll sort it out'
+        'pick your tier and the right staff will jump in\n\n'
+        '🎁 **Claim Reward**\n'
+        "won a giveaway or hit an invite milestone?\n"
+        "have your proof ready and we'll get it sorted"
     )
-    e.set_footer(text="Trial's Cross Trade  •  tap a button to get started")
+    e.set_footer(text="tap a button below to get started")
     await ctx.send(embed=e, view=TicketPanel())
     try:
         await ctx.message.delete()
@@ -1602,7 +1618,7 @@ async def setcategory_cmd(ctx, category: discord.CategoryChannel = None):
             ctx.guild.id, category.id
         )
     e = discord.Embed(color=0x57F287)
-    e.description = f'ticket category set to **{category.name}**'
+    e.description = f'✅ ticket category set to **{category.name}**'
     e.set_footer(text=f'set by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -1618,7 +1634,7 @@ async def setlogs_cmd(ctx, channel: discord.TextChannel = None):
             ctx.guild.id, channel.id
         )
     e = discord.Embed(color=0x57F287)
-    e.description = f'logs going to {channel.mention} from now on'
+    e.description = f'✅ logs going to {channel.mention} from now on'
     e.set_footer(text=f'set by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -1628,33 +1644,33 @@ async def setlogs_cmd(ctx, channel: discord.TextChannel = None):
 async def config_cmd(ctx):
     async with db.pool.acquire() as c:
         cfg = await c.fetchrow('SELECT * FROM config WHERE guild_id=$1', ctx.guild.id)
-    e = discord.Embed(title=f'config  •  {ctx.guild.name}', color=TIER_COLOR['support'])
+    e = discord.Embed(title=f'⚙️  config  —  {ctx.guild.name}', color=TIER_COLOR['support'])
 
     cat  = ctx.guild.get_channel(cfg['ticket_category_id']) if cfg and cfg.get('ticket_category_id') else None
     logs = ctx.guild.get_channel(cfg['log_channel_id'])     if cfg and cfg.get('log_channel_id')     else None
-    e.add_field(name='**Category**',  value=cat.mention  if cat  else 'not set', inline=True)
-    e.add_field(name='**Log Channel**', value=logs.mention if logs else 'not set', inline=True)
-    e.add_field(name='**Total Tickets**', value=str(cfg['ticket_counter'] if cfg else 0), inline=True)
-    e.add_field(name='**Status**',      value='🔒 locked' if tickets_locked.get(ctx.guild.id) else '🟢 open', inline=True)
+    e.add_field(name='📁 category',     value=cat.mention  if cat  else 'not set', inline=True)
+    e.add_field(name='📋 logs',         value=logs.mention if logs else 'not set', inline=True)
+    e.add_field(name='🎫 total tickets', value=str(cfg['ticket_counter'] if cfg else 0), inline=True)
+    e.add_field(name='🔒 ticket status', value='🔒 locked' if tickets_locked.get(ctx.guild.id) else '🟢 open', inline=True)
 
     welcome_ch = ctx.guild.get_channel(WELCOME_CHANNEL)
     invite_ch  = ctx.guild.get_channel(INVITE_CHANNEL)
     verify_ch  = ctx.guild.get_channel(VERIFY_CHANNEL)
     proof_ch   = ctx.guild.get_channel(PROOF_CHANNEL)
-    e.add_field(name='**Welcome Channel**', value=welcome_ch.mention if welcome_ch else 'not found', inline=True)
-    e.add_field(name='**Invite Log**',      value=invite_ch.mention  if invite_ch  else 'not found', inline=True)
-    e.add_field(name='**Verify Channel**',  value=verify_ch.mention  if verify_ch  else 'not found', inline=True)
-    e.add_field(name='**Proof Channel**',   value=proof_ch.mention   if proof_ch   else 'not found', inline=True)
+    e.add_field(name='👋 welcome',   value=welcome_ch.mention if welcome_ch else 'not found', inline=True)
+    e.add_field(name='📨 invite log', value=invite_ch.mention  if invite_ch  else 'not found', inline=True)
+    e.add_field(name='✅ verify',     value=verify_ch.mention  if verify_ch  else 'not found', inline=True)
+    e.add_field(name='📸 proof',      value=proof_ch.mention   if proof_ch   else 'not found', inline=True)
 
     unverified_r = ctx.guild.get_role(UNVERIFIED_ROLE)
     verified_r   = ctx.guild.get_role(VERIFIED_ROLE)
     member_r     = ctx.guild.get_role(MEMBER_ROLE)
-    e.add_field(name='**Unverified Role**', value=unverified_r.mention if unverified_r else 'not found', inline=True)
-    e.add_field(name='**Verified Role**',   value=verified_r.mention   if verified_r   else 'not found', inline=True)
-    e.add_field(name='**Member Role**',     value=member_r.mention     if member_r     else 'not found', inline=True)
+    e.add_field(name='❓ unverified role', value=unverified_r.mention if unverified_r else 'not found', inline=True)
+    e.add_field(name='✅ verified role',   value=verified_r.mention   if verified_r   else 'not found', inline=True)
+    e.add_field(name='👤 member role',     value=member_r.mention     if member_r     else 'not found', inline=True)
 
-    e.add_field(name='**Uptime**',  value=fmt_uptime(datetime.now(timezone.utc) - BOT_START), inline=True)
-    e.add_field(name='**Latency**', value=f'{round(bot.latency * 1000)}ms', inline=True)
+    e.add_field(name='⏱️ uptime',   value=fmt_uptime(datetime.now(timezone.utc) - BOT_START), inline=True)
+    e.add_field(name='📡 latency', value=f'{round(bot.latency * 1000)}ms', inline=True)
     footer = 'finish setup with $setcategory and $setlogs' if not cfg else f'requested by {ctx.author.display_name}'
     e.set_footer(text=footer)
     await ctx.reply(embed=e)
@@ -1665,7 +1681,7 @@ async def config_cmd(ctx):
 async def lock_cmd(ctx):
     tickets_locked[ctx.guild.id] = True
     e = discord.Embed(color=0xED4245)
-    e.description = f'tickets are now **closed** — nobody can open new ones\nuse `$unlock` to reopen'
+    e.description = f'🔒 **tickets locked** — nobody can open new ones\nuse `$unlock` to reopen'
     e.set_footer(text=f'locked by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -1675,7 +1691,7 @@ async def lock_cmd(ctx):
 async def unlock_cmd(ctx):
     tickets_locked[ctx.guild.id] = False
     e = discord.Embed(color=0x57F287)
-    e.description = f"tickets are back open — people can create them again"
+    e.description = f'🟢 **tickets unlocked** — people can create them again'
     e.set_footer(text=f'unlocked by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -1693,9 +1709,9 @@ async def blacklist_cmd(ctx, member: discord.Member = None, *, reason: str = 'no
         )
     e = discord.Embed(color=0xED4245)
     e.set_author(name=f'{member.display_name} blacklisted', icon_url=member.display_avatar.url)
-    e.add_field(name='**User**',   value=member.mention,     inline=True)
-    e.add_field(name='**By**',     value=ctx.author.mention, inline=True)
-    e.add_field(name='**Reason**', value=reason,             inline=False)
+    e.add_field(name='🚫 user',   value=member.mention,     inline=True)
+    e.add_field(name='👤 by',     value=ctx.author.mention, inline=True)
+    e.add_field(name='📋 reason', value=reason,             inline=False)
     e.set_thumbnail(url=member.display_avatar.url)
     e.set_footer(text=f'blacklisted by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -1713,7 +1729,7 @@ async def unblacklist_cmd(ctx, member: discord.Member = None):
     if result == 'DELETE 0':
         return await ctx.reply(embed=discord.Embed(description=f"{member.mention} isn't blacklisted", color=0xFEE75C))
     e = discord.Embed(color=0x57F287)
-    e.description = f'{member.mention} is off the blacklist'
+    e.description = f'✅ {member.mention} is off the blacklist'
     e.set_footer(text=f'removed by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -1732,7 +1748,7 @@ async def blacklists_cmd(ctx):
         date = r['created_at'].strftime('%b %d') if r.get('created_at') else '?'
         name = m.display_name if m else str(r['user_id'])
         lines.append(f"**{name}** — {r['reason']}  (by {by.display_name if by else '?'} on {date})")
-    e = discord.Embed(title=f'blacklisted  •  {ctx.guild.name}  ({len(rows)})', color=0xED4245)
+    e = discord.Embed(title=f'🚫  blacklist  —  {ctx.guild.name}  ({len(rows)})', color=0xED4245)
     e.description = '\n'.join(lines)
     e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -1757,15 +1773,13 @@ async def invites_cmd(ctx, member: discord.Member = None):
     word     = 'invite' if real == 1 else 'invites'
 
     e = discord.Embed(color=0x5865F2)
-    e.set_author(name=f'invites  •  {member.display_name}', icon_url=member.display_avatar.url)
-    e.description = (
-        f'**{member.display_name}**  •  {real} real {word}\n\n'
-        f'**Joins**    ╸  {joins}\n'
-        f'**Left**     ╸  {leaves}\n'
-        f'**Fake**     ╸  {fake}\n'
-        f'**Rejoins**  ╸  {rejoins}  *(within 7 days)*\n'
-        f'**Verified** ╸  {verified}'
-    )
+    e.set_author(name=f'{member.display_name}', icon_url=member.display_avatar.url)
+    e.description = f'## 📨 {real} real {word}'
+    e.add_field(name='📥 joins',    value=str(joins),    inline=True)
+    e.add_field(name='🚪 left',     value=str(leaves),   inline=True)
+    e.add_field(name='🤖 fake',     value=str(fake),     inline=True)
+    e.add_field(name='🔄 rejoins',  value=str(rejoins),  inline=True)
+    e.add_field(name='✅ verified', value=str(verified), inline=True)
     e.set_thumbnail(url=member.display_avatar.url)
     e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -1782,7 +1796,7 @@ async def build_lb_embed(guild, last_updated: str = None) -> discord.Embed:
             guild.id
         )
     if not rows:
-        e = discord.Embed(title=f'Invite Leaderboard  •  {guild.name}', color=0x5865F2)
+        e = discord.Embed(title=f'🏆  invite leaderboard  —  {guild.name}', color=0x5865F2)
         e.description = 'no invite data yet'
         return e
 
@@ -1796,14 +1810,12 @@ async def build_lb_embed(guild, last_updated: str = None) -> discord.Embed:
         medal  = medals.get(i, f'`{i}.`')
         lines.append(
             f'{medal} {name} — **{real}** {word}\n'
-            f'**Left:** {row["leaves"]}  **Fake:** {row["fake"]}  '
-            f'**Rejoins:** {row["rejoins"]}  **Verified:** {row["verified"]}'
+            f'🚪 {row["leaves"]} left  🤖 {row["fake"]} fake  🔄 {row["rejoins"]} rejoins  ✅ {row["verified"]} verified'
         )
 
-    e  = discord.Embed(title=f'Invite Leaderboard  •  {guild.name}', color=0x5865F2)
+    e  = discord.Embed(title=f'🏆  invite leaderboard  —  {guild.name}', color=0x5865F2)
     e.description = '\n'.join(lines)
-    ts = last_updated or datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
-    e.set_footer(text=f'updates every 30s  •  last refreshed {ts}')
+    e.set_footer(text='live  •  updates every 30s')
     return e
 
 
@@ -1827,7 +1839,7 @@ class LiveLBView(View):
             self.task.cancel()
         self.stop()
         e = await build_lb_embed(interaction.guild)
-        e.set_footer(text='stopped  •  run $lb again to restart')
+        e.set_footer(text='stopped — run $lb again to restart')
         await interaction.response.edit_message(embed=e, view=None)
 
     async def on_timeout(self):
@@ -1836,7 +1848,7 @@ class LiveLBView(View):
             self.task.cancel()
         try:
             e = await build_lb_embed(self.message.guild)
-            e.set_footer(text='timed out  •  run $lb to restart')
+            e.set_footer(text='timed out — run $lb to restart')
             await self.message.edit(embed=e, view=None)
         except Exception:
             pass
@@ -1848,8 +1860,7 @@ async def live_lb_loop(view: LiveLBView, guild):
             await asyncio.sleep(30)
             if view.stopped:
                 break
-            ts = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
-            e  = await build_lb_embed(guild, ts)
+            e  = await build_lb_embed(guild)
             try:
                 await view.message.edit(embed=e, view=view)
             except Exception:
@@ -1871,7 +1882,7 @@ async def whoinvited_cmd(ctx, member: discord.Member = None):
         return await ctx.reply(embed=discord.Embed(description=f'no invite data found for {member.mention}', color=0x5865F2))
     inviter = ctx.guild.get_member(row['inviter_id'])
     e = discord.Embed(color=0x5865F2)
-    e.description = f'{member.mention} was invited by {inviter.mention if inviter else str(row["inviter_id"])}'
+    e.description = f'📨 {member.mention} was invited by **{inviter.mention if inviter else str(row["inviter_id"])}**'
     e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -1898,7 +1909,8 @@ async def invited_cmd(ctx, member: discord.Member = None):
         )
     if not rows:
         e = discord.Embed(color=0x5865F2)
-        e.description = f"## {member.display_name} hasn't invited anyone yet"
+        e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        e.description = f"hasn't invited anyone yet"
         e.set_thumbnail(url=member.display_avatar.url)
         e.set_footer(text=f'requested by {ctx.author.display_name}')
         return await ctx.reply(embed=e)
@@ -1909,36 +1921,38 @@ async def invited_cmd(ctx, member: discord.Member = None):
 
     for r in rows:
         invited_member = ctx.guild.get_member(r['user_id'])
-        date = r['joined_at'].strftime('%b %d, %Y') if r.get('joined_at') else '?'
-
         if r.get('is_rejoin'):
             counts['rejoin'] += 1
-            tag = 'rejoin'
+            tag = '🔄'
         elif invited_member is None:
             counts['left'] += 1
-            tag = 'left'
+            tag = '🚪'
         elif verified_role and verified_role in invited_member.roles:
             counts['verified'] += 1
-            tag = 'verified'
+            tag = '✅'
         else:
             counts['unverified'] += 1
-            tag = 'unverified'
+            tag = '👤'
 
         name = invited_member.mention if invited_member else f'`{r["user_id"]}`'
-        lines.append(f'{tag}  {name}  •  {date}')
+        lines.append(f'{tag} {name}')
 
     total = len(rows)
     e = discord.Embed(color=0x5865F2)
-    e.set_author(name=f'Invited by {member.display_name}', icon_url=member.display_avatar.url)
-    e.description = (
-        f'## {total} total invite{"s" if total != 1 else ""}\n\n'
-        f'**Verified** :  {counts["verified"]}\n'
-        f'**Unverified** :  {counts["unverified"]}\n'
-        f'**Left** :  {counts["left"]}\n'
-        f'**Rejoins** :  {counts["rejoin"]}\n\n'
-        + '\n'.join(lines[:20])
-        + (f'\n... and {total - 20} more' if total > 20 else '')
+    e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+    e.description = f'## 📨 {total} total invite{"s" if total != 1 else ""}'
+    e.add_field(name='✅ verified',   value=str(counts['verified']),   inline=True)
+    e.add_field(name='👤 unverified', value=str(counts['unverified']), inline=True)
+    e.add_field(name='🚪 left',       value=str(counts['left']),       inline=True)
+    e.add_field(name='🔄 rejoins',    value=str(counts['rejoin']),     inline=True)
+    members_text = (
+        '\n'.join(lines[:20])
+        + (f'\n*... and {total - 20} more*' if total > 20 else '')
     )
+    if members_text:
+        e.add_field(name='👥 members', value=members_text, inline=False)
+    # placeholder so thumbnail doesn't break layout
+    e.description = e.description  # keep description
     e.set_thumbnail(url=member.display_avatar.url)
     e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -1961,8 +1975,8 @@ async def clearinvites_cmd(ctx, target: str = None):
             await c.execute('DELETE FROM member_invites WHERE guild_id=$1', ctx.guild.id)
             await c.execute('DELETE FROM member_left    WHERE guild_id=$1', ctx.guild.id)
         e = discord.Embed(color=0x57F287)
-        e.description = f'all invite stats cleared for **{ctx.guild.name}**'
-        e.set_footer(text=f'Cleared by {ctx.author.display_name}')
+        e.description = f'🗑️ all invite stats cleared for **{ctx.guild.name}**'
+        e.set_footer(text=f'cleared by {ctx.author.display_name}')
         return await ctx.reply(embed=e)
 
     try:
@@ -1978,7 +1992,7 @@ async def clearinvites_cmd(ctx, target: str = None):
             ctx.guild.id, member.id
         )
     e = discord.Embed(color=0x57F287)
-    e.description = f'invite stats cleared for {member.mention}'
+    e.description = f'🗑️ invite stats cleared for {member.mention}'
     await ctx.reply(embed=e)
 
 
@@ -2022,7 +2036,7 @@ async def snipe_cmd(ctx):
     e.description = data['content']
     if data.get('attachments'):
         e.add_field(name='**Attachments**', value='\n'.join(data['attachments']), inline=False)
-    e.set_footer(text=f'sniped by {ctx.author.display_name}')
+    e.set_footer(text=f'👻 sniped by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2033,9 +2047,9 @@ async def esnipe_cmd(ctx):
         return await ctx.reply(embed=discord.Embed(description='no edited messages cached in this channel', color=0x5865F2))
     e = discord.Embed(color=0x5865F2)
     e.set_author(name=data['author'].display_name, icon_url=data['avatar'])
-    e.add_field(name='**Before**', value=data['before'][:1024], inline=False)
-    e.add_field(name='**After**',  value=data['after'][:1024],  inline=False)
-    e.set_footer(text=f'sniped by {ctx.author.display_name}')
+    e.add_field(name='📤 before', value=data['before'][:1024], inline=False)
+    e.add_field(name='📥 after',  value=data['after'][:1024],  inline=False)
+    e.set_footer(text=f'👻 sniped by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2044,7 +2058,7 @@ async def ping_cmd(ctx):
     latency = round(bot.latency * 1000)
     bar = '█' * min(10, latency // 10) + '░' * max(0, 10 - latency // 10)
     e = discord.Embed(color=0x57F287 if latency < 150 else 0xFEE75C if latency < 300 else 0xED4245)
-    e.description = f'`{bar}` **{latency}ms**'
+    e.description = f'🏓 `{bar}` **{latency}ms**'
     e.set_footer(text=f'up for {fmt_uptime(datetime.now(timezone.utc) - BOT_START)}')
     await ctx.reply(embed=e)
 
@@ -2052,7 +2066,7 @@ async def ping_cmd(ctx):
 @bot.command(name='uptime')
 async def uptime_cmd(ctx):
     delta = datetime.now(timezone.utc) - BOT_START
-    e = discord.Embed(description=f'running for **{fmt_uptime(delta)}** without a restart', color=0x57F287)
+    e = discord.Embed(description=f'⏱️ been running for **{fmt_uptime(delta)}** without a restart', color=0x57F287)
     e.set_footer(text="Trial's Cross Trade")
     await ctx.reply(embed=e)
 
@@ -2067,9 +2081,9 @@ async def slowmode_cmd(ctx, seconds: int = None):
         return await ctx.reply(embed=discord.Embed(description='slowmode must be between 0 and 21600 seconds', color=0xED4245))
     await ctx.channel.edit(slowmode_delay=seconds)
     if seconds == 0:
-        await ctx.reply(embed=discord.Embed(description=f'slowmode off in {ctx.channel.mention}', color=0x57F287))
+        await ctx.reply(embed=discord.Embed(description=f'⚡ slowmode disabled in {ctx.channel.mention}', color=0x57F287))
     else:
-        await ctx.reply(embed=discord.Embed(description=f'slowmode set to **{seconds}s** in {ctx.channel.mention}', color=0x57F287))
+        await ctx.reply(embed=discord.Embed(description=f'🐢 slowmode set to **{seconds}s** in {ctx.channel.mention}', color=0x57F287))
 
 
 @bot.command(name='say')
@@ -2096,14 +2110,14 @@ async def userinfo_cmd(ctx, member: discord.Member = None):
     e = discord.Embed(color=member.color.value if member.color.value else 0x5865F2)
     e.set_author(name=str(member), icon_url=member.display_avatar.url)
     e.set_thumbnail(url=member.display_avatar.url)
-    e.add_field(name='**ID**',          value=str(member.id),          inline=True)
-    e.add_field(name='**Nickname**',    value=member.nick or 'none',   inline=True)
-    e.add_field(name='**Bot**',         value='yes' if member.bot else 'no', inline=True)
-    e.add_field(name='**Account Age**', value=f'{acc_age}d',           inline=True)
-    e.add_field(name='**In Server**',   value=f'{srv_age}d',           inline=True)
-    e.add_field(name='**Status**',      value=str(member.status).title(), inline=True)
+    e.add_field(name='🪪 id',           value=str(member.id),          inline=True)
+    e.add_field(name='💬 nickname',     value=member.nick or 'none',   inline=True)
+    e.add_field(name='🤖 bot',          value='yes' if member.bot else 'no', inline=True)
+    e.add_field(name='📅 account age',  value=f'{acc_age}d',           inline=True)
+    e.add_field(name='📆 in server',    value=f'{srv_age}d',           inline=True)
+    e.add_field(name='🟢 status',       value=str(member.status).title(), inline=True)
     e.add_field(
-        name=f'**Roles** ({len(roles)})',
+        name=f'🏷️ roles ({len(roles)})',
         value=' '.join(roles[:15]) + (' ...' if len(roles) > 15 else '') if roles else 'none',
         inline=False
     )
@@ -2119,21 +2133,21 @@ async def serverinfo_cmd(ctx):
     online  = sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot)
     created = guild.created_at.replace(tzinfo=timezone.utc) if guild.created_at.tzinfo is None else guild.created_at
     age     = (datetime.now(timezone.utc) - created).days
-    e = discord.Embed(title=guild.name, color=0x5865F2)
+    e = discord.Embed(title=f'🏠  {guild.name}', color=0x5865F2)
     if guild.icon:
         e.set_thumbnail(url=guild.icon.url)
-    e.add_field(name='**Owner**',       value=guild.owner.mention if guild.owner else 'unknown', inline=True)
-    e.add_field(name='**Server ID**',   value=str(guild.id),   inline=True)
-    e.add_field(name='**Server Age**',  value=f'{age}d',       inline=True)
-    e.add_field(name='**Members**',     value=str(guild.member_count), inline=True)
-    e.add_field(name='**Humans**',      value=str(humans),     inline=True)
-    e.add_field(name='**Bots**',        value=str(bots),       inline=True)
-    e.add_field(name='**Online**',      value=str(online),     inline=True)
-    e.add_field(name='**Channels**',    value=str(len(guild.channels)), inline=True)
-    e.add_field(name='**Roles**',       value=str(len(guild.roles)),    inline=True)
-    e.add_field(name='**Boost Level**', value=str(guild.premium_tier),  inline=True)
-    e.add_field(name='**Boosts**',      value=str(guild.premium_subscription_count), inline=True)
-    e.add_field(name='**Emojis**',      value=f'{len(guild.emojis)}/{guild.emoji_limit}', inline=True)
+    e.add_field(name='👑 owner',       value=guild.owner.mention if guild.owner else 'unknown', inline=True)
+    e.add_field(name='🪪 server id',   value=str(guild.id),   inline=True)
+    e.add_field(name='📅 age',         value=f'{age}d',       inline=True)
+    e.add_field(name='👥 members',     value=f'{guild.member_count:,}', inline=True)
+    e.add_field(name='🧑 humans',      value=f'{humans:,}',   inline=True)
+    e.add_field(name='🤖 bots',        value=str(bots),       inline=True)
+    e.add_field(name='🟢 online',      value=str(online),     inline=True)
+    e.add_field(name='💬 channels',    value=str(len(guild.channels)), inline=True)
+    e.add_field(name='🏷️ roles',       value=str(len(guild.roles)),    inline=True)
+    e.add_field(name='🚀 boost level', value=str(guild.premium_tier),  inline=True)
+    e.add_field(name='💎 boosts',      value=str(guild.premium_subscription_count), inline=True)
+    e.add_field(name='😄 emojis',      value=f'{len(guild.emojis)}/{guild.emoji_limit}', inline=True)
     e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -2147,10 +2161,10 @@ async def membercount_cmd(ctx):
     online = sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot)
     e = discord.Embed(title=f'{guild.name}', color=0x5865F2)
     e.set_thumbnail(url=guild.icon.url if guild.icon else None)
-    e.add_field(name='**Total**',   value=f'{total:,}',  inline=True)
-    e.add_field(name='**Humans**',  value=str(humans), inline=True)
-    e.add_field(name='**Bots**',    value=str(bots),   inline=True)
-    e.add_field(name='**Online**',  value=str(online), inline=True)
+    e.add_field(name='👥 total',   value=f'{total:,}',   inline=True)
+    e.add_field(name='🧑 humans',  value=f'{humans:,}', inline=True)
+    e.add_field(name='🤖 bots',    value=str(bots),     inline=True)
+    e.add_field(name='🟢 online',  value=str(online),   inline=True)
     e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
@@ -2162,12 +2176,10 @@ async def newest_cmd(ctx):
         key=lambda m: m.joined_at or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True
     )[:5]
-    e = discord.Embed(title=f'Newest Members  •  {ctx.guild.name}', color=0x57F287)
+    e = discord.Embed(title=f'🆕  newest members  —  {ctx.guild.name}', color=0x57F287)
     lines = []
     for i, m in enumerate(members, 1):
-        joined  = m.joined_at.strftime('%b %d, %Y') if m.joined_at  else '?'
-        created = m.created_at.strftime('%b %d, %Y') if m.created_at else '?'
-        lines.append(f'**{i}.** {m.mention}  •  joined {joined}  •  acc created {created}')
+        lines.append(f'**{i}.** {m.mention}')
     e.description = '\n'.join(lines)
     e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -2179,12 +2191,10 @@ async def oldest_cmd(ctx):
         [m for m in ctx.guild.members if not m.bot],
         key=lambda m: m.joined_at or datetime.now(timezone.utc)
     )[:5]
-    e = discord.Embed(title=f'OGs  •  {ctx.guild.name}', color=0xF1C40F)
+    e = discord.Embed(title=f'👴  OGs  —  {ctx.guild.name}', color=0xF1C40F)
     lines = []
     for i, m in enumerate(members, 1):
-        joined  = m.joined_at.strftime('%b %d, %Y') if m.joined_at  else '?'
-        created = m.created_at.strftime('%b %d, %Y') if m.created_at else '?'
-        lines.append(f'**{i}.** {m.mention}  •  joined {joined}  •  acc created {created}')
+        lines.append(f'**{i}.** {m.mention}')
     e.description = '\n'.join(lines)
     e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -2195,8 +2205,8 @@ async def botlist_cmd(ctx):
     bots = sorted([m for m in ctx.guild.members if m.bot], key=lambda m: m.name.lower())
     if not bots:
         return await ctx.reply(embed=discord.Embed(description='no bots in this server', color=0x5865F2))
-    lines = [f'**{i}.** {b.mention}  •  `{b.name}`' for i, b in enumerate(bots, 1)]
-    e = discord.Embed(title=f'bots in {ctx.guild.name}  ({len(bots)})', color=0x5865F2)
+    lines = [f'**{i}.** {b.mention}' for i, b in enumerate(bots, 1)]
+    e = discord.Embed(title=f'🤖  bots in {ctx.guild.name}  ({len(bots)})', color=0x5865F2)
     e.description = '\n'.join(lines)
     e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -2224,16 +2234,13 @@ async def ticketstats_cmd(ctx):
         stars = '★' * full + '☆' * (5 - full)
 
     e = discord.Embed(color=0x5865F2)
-    e.set_author(name=f'ticket stats  •  {member.display_name}', icon_url=member.display_avatar.url)
-    e.description = (
-        f'## {member.display_name}\n\n'
-        f'**Claimed**     ╸  {claimed}\n'
-        f'**Closed**      ╸  {closed}\n'
-        f'**Completion**  ╸  {completion}\n'
-        f'**Rating**      ╸  {stars}  {avg_rating}'
-    )
+    e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
     e.set_thumbnail(url=member.display_avatar.url)
-    e.set_footer(text='run $rateme inside a ticket to request a rating from the person you helped')
+    e.add_field(name='✋ claimed',     value=str(claimed),    inline=True)
+    e.add_field(name='🔒 closed',     value=str(closed),     inline=True)
+    e.add_field(name='📊 completion', value=completion,      inline=True)
+    e.add_field(name=f'⭐ rating',    value=f'{stars}  {avg_rating}' if stars else avg_rating, inline=False)
+    e.set_footer(text='use $rateme inside a ticket to get rated by the person you helped')
     await ctx.reply(embed=e)
 
 
@@ -2285,7 +2292,7 @@ class RatingView(View):
             )
         stars = '★' * rating + '☆' * (5 - rating)
         e = discord.Embed(color=0x57F287)
-        e.description = f'got it, thanks\n\n**{stars}**  {rating}/5'
+        e.description = f'got it — thanks for rating! \n\n{stars}  **{rating}/5**'
         e.set_footer(text="Trial's Cross Trade")
         await interaction.response.edit_message(embed=e, view=None)
 
@@ -2337,15 +2344,16 @@ async def rateme_cmd(ctx):
     e = discord.Embed(color=0x5865F2)
     e.set_author(name="Trial's Cross Trade", icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
     e.description = (
+        f'⭐ **rate your experience**\n\n'
         f'**{ctx.author.display_name}** handled your ticket **#{ticket["ticket_id"]}**\n\n'
-        f'how was your experience? tap a number — 1 is bad, 5 is great\n'
-        f'takes two seconds and means a lot'
+        f'how\'d it go? tap a number below\n'
+        f'1 is the worst, 5 is the best'
     )
-    e.set_footer(text='expires in 24h  •  your rating is private')
+    e.set_footer(text='you have 24h to rate  •  your response is private')
     try:
         await creator.send(embed=e, view=view)
-        resp = discord.Embed(description=f'sent a rating request to {creator.mention}', color=0x57F287)
-        resp.set_footer(text='they have 24 hours — you\'ll get it in your stats automatically')
+        resp = discord.Embed(description=f'✅ rating request sent to {creator.mention}', color=0x57F287)
+        resp.set_footer(text="they have 24h — it'll show up in your stats automatically")
         await ctx.reply(embed=resp)
     except discord.Forbidden:
         await ctx.reply(embed=discord.Embed(
@@ -2377,21 +2385,21 @@ async def activemm_cmd(ctx):
 
         lines = []
         for m in sorted(online,  key=lambda x: x.display_name.lower()):
-            dot = 'online' if m.status == discord.Status.online else ('idle' if m.status == discord.Status.idle else 'dnd')
-            lines.append(f'{m.mention} [{dot}]')
+            dot = '🟢' if m.status == discord.Status.online else ('🌙' if m.status == discord.Status.idle else '🔴')
+            lines.append(f'{dot} {m.mention}')
         for m in sorted(offline, key=lambda x: x.display_name.lower()):
-            lines.append(f'{m.mention} [offline]')
+            lines.append(f'⚫ {m.mention}')
         if lines:
             sections.append(
                 f'**{tier_names[tier]}** — {len(online)}/{len(members)} online\n'
-                + '\n'.join(lines)
+                + '  '.join(lines)
             )
 
     if not sections:
         return await ctx.reply(embed=discord.Embed(description='no middlemen found', color=0x5865F2))
 
     e = discord.Embed(
-        title=f'Active Middlemen  •  {ctx.guild.name}',
+        title=f'⚖️  active middlemen  —  {ctx.guild.name}',
         color=0x57F287 if total_online > 0 else 0x747F8D
     )
     e.description = '\n\n'.join(sections)
@@ -2403,8 +2411,8 @@ async def activemm_cmd(ctx):
 
 HELP_PAGES = [
     {
-        'title': 'Commands  •  Page 1 / 8',
-        'name':  'Tickets  •  Staff and Middleman',
+        'title': '🎫  commands  —  page 1 / 8',
+        'name':  '🎫  tickets',
         'value': (
             '`$claim`                  claim a ticket\n'
             '`$unclaim`                drop your claim\n'
@@ -2419,8 +2427,8 @@ HELP_PAGES = [
         ),
     },
     {
-        'title': 'Commands  •  Page 2 / 8',
-        'name':  'Staff Tools',
+        'title': '🛡️  commands  —  page 2 / 8',
+        'name':  '🛡️  staff tools',
         'value': (
             '`$channelperm #ch @target perm on/off`  — one channel\n'
             '`$channelpermall @target perm on/off`   — all channels\n'
@@ -2431,8 +2439,8 @@ HELP_PAGES = [
         ),
     },
     {
-        'title': 'Commands  •  Page 3 / 8',
-        'name':  'Utility  •  Everyone',
+        'title': '🔧  commands  —  page 3 / 8',
+        'name':  '🔧  utility',
         'value': (
             '`$snipe` / `$sn`       last deleted message in channel\n'
             '`$esnipe` / `$es`      last edited message in channel\n'
@@ -2446,16 +2454,16 @@ HELP_PAGES = [
         ),
     },
     {
-        'title': 'Commands  •  Page 4 / 8',
-        'name':  'User and Server Info',
+        'title': '📋  commands  —  page 4 / 8',
+        'name':  '📋  info',
         'value': (
             '`$userinfo [@user]`    full info — roles, age, status  •  `$ui` `$whois`\n'
             '`$serverinfo`          server overview — members, boosts, channels  •  `$si`'
         ),
     },
     {
-        'title': 'Commands  •  Page 5 / 8',
-        'name':  'Invites  •  Everyone',
+        'title': '📨  commands  —  page 5 / 8',
+        'name':  '📨  invites',
         'value': (
             '`$invites [@user]`                view your or someone\'s invite stats\n'
             '`$invited @user`                  see everyone that user has invited\n'
@@ -2466,8 +2474,8 @@ HELP_PAGES = [
         ),
     },
     {
-        'title': 'Commands  •  Page 6 / 8',
-        'name':  'Setup  •  Owner Only',
+        'title': '⚙️  commands  —  page 6 / 8',
+        'name':  '⚙️  setup',
         'value': (
             '`$setup`               post ticket panel (support, mm, reward)\n'
             '`$setupverify`         post verification panel\n'
@@ -2482,8 +2490,8 @@ HELP_PAGES = [
         ),
     },
     {
-        'title': 'Commands  •  Page 7 / 8',
-        'name':  'Giveaways  •  Slash Commands  •  GW Host role required',
+        'title': '🎉  commands  —  page 7 / 8',
+        'name':  '🎉  giveaways',
         'value': (
             '`/giveaway create`         create a giveaway\n'
             '  `duration` `winners` `prize` `channel` `host` `image` `required_role`\n\n'
@@ -2497,8 +2505,8 @@ HELP_PAGES = [
         ),
     },
     {
-        'title': 'Commands  •  Page 8 / 8',
-        'name':  'Quick Reference  •  Aliases',
+        'title': '📖  commands  —  page 8 / 8',
+        'name':  '📖  aliases',
         'value': (
             '`$sn`   →  `$snipe`          `$es`  →  `$esnipe`\n'
             '`$mc`   →  `$membercount`    `$nw`  →  `$newest`\n'
@@ -2518,7 +2526,7 @@ def make_help_embed(page: int) -> discord.Embed:
     p = HELP_PAGES[page]
     e = discord.Embed(title=p['title'], color=TIER_COLOR['support'])
     e.add_field(name=p['name'], value=p['value'], inline=False)
-    e.set_footer(text=f"Trial's Cross Trade  •  page {page + 1} of {len(HELP_PAGES)}")
+    e.set_footer(text=f"Trial's Cross Trade  —  page {page + 1} of {len(HELP_PAGES)}")
     return e
 
 
@@ -2597,9 +2605,9 @@ class VerifyView(View):
             )
         code = gen_captcha()
         captchas[user.id] = code
-        e = discord.Embed(title='Captcha Verification', color=0x5865F2)
-        e.description = f"here's your code:\n\n# `{code}`\n\ntype it in this channel"
-        e.set_footer(text='case insensitive')
+        e = discord.Embed(title='🔐  verify', color=0x5865F2)
+        e.description = f"here's your code — type it in the verify channel\n\n# `{code}`"
+        e.set_footer(text='not case sensitive')
         await interaction.response.send_message(embed=e, ephemeral=True)
 
 
@@ -2674,14 +2682,14 @@ def make_welcome_card(avatar_bytes: bytes, username: str, server_name: str, memb
 @owner_only()
 async def setupverify_cmd(ctx):
     e = discord.Embed(color=0x57F287)
-    e.set_author(name="Trial's Cross Trade  •  Verification")
+    e.set_author(name="Trial's Cross Trade", icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
     e.description = (
+        "## ✅ verification\n\n"
         "welcome to **Trial's Cross Trade**\n\n"
-        "before you can access the rest of the server you need to verify\n"
-        "it takes under 10 seconds and keeps the server safe\n\n"
-        "hit the button below, type the code you get — and you're in"
+        "tap the button below and type the code you receive to get in\n"
+        "takes less than 10 seconds"
     )
-    e.set_footer(text="Trial's Cross Trade  •  click below to get started")
+    e.set_footer(text="tap the button below to verify")
     await ctx.send(embed=e, view=VerifyView())
     try:
         await ctx.message.delete()
@@ -2732,26 +2740,26 @@ async def get_entry_count(member: discord.Member, bonus_roles: list) -> int:
 
 
 async def build_giveaway_embed(prize, winners, host, ends_at, required_role, image, bonus_roles, guild=None):
-    e = discord.Embed(title=f'🎉 {prize}', color=0x2ECC71)
+    e = discord.Embed(title=f'🎉  {prize}', color=0x2ECC71)
     e.description = (
-        f'Click 🎉 to enter!\n'
-        f'**Winners:** {winners}\n'
-        f'**Hosted by:** {host.mention}\n'
-        f'**Ends:** {format_time_left(ends_at)}'
+        f'press 🎉 to enter!\n\n'
+        f'🏆 **winners** — {winners}\n'
+        f'👑 **hosted by** — {host.mention}\n'
+        f'⏳ **ending** — {format_time_left(ends_at)}'
     )
     if bonus_roles and guild:
         lines = []
         for role_id, entries in bonus_roles:
             r = guild.get_role(role_id)
             if r:
-                lines.append(f'{r.mention}: **{entries}** entries')
+                lines.append(f'{r.mention} — **{entries}** bonus entr{"y" if entries == 1 else "ies"}')
         if lines:
-            e.add_field(name='**Extra Entries:**', value='\n'.join(lines), inline=False)
+            e.add_field(name='🎫 bonus entries', value='\n'.join(lines), inline=False)
     if required_role:
-        e.add_field(name='\u200b', value=f'Must have the role: {required_role.mention}', inline=False)
+        e.add_field(name='🔒 required role', value=required_role.mention, inline=False)
     if image:
         e.set_image(url=image)
-    e.set_footer(text=f'Ends at | {format_end_date(ends_at)}')
+    e.set_footer(text='press the button below to enter')
     return e
 
 
@@ -3044,7 +3052,12 @@ async def giveaway_create(
 @giveaway_group.command(name='end', description='End a giveaway early')
 @app_commands.describe(message_id='The message ID of the giveaway to end')
 async def giveaway_end(interaction: discord.Interaction, message_id: str):
-    if not interaction.user.guild_permissions.manage_guild and not _is_staff(interaction.user):
+    has_perm = (
+        interaction.user.guild_permissions.manage_guild
+        or interaction.user.get_role(GW_HOST_ROLE) is not None
+        or _is_staff(interaction.user)
+    )
+    if not has_perm:
         return await interaction.response.send_message(
             embed=discord.Embed(description='staff only', color=0xED4245), ephemeral=True
         )
@@ -3076,7 +3089,12 @@ async def giveaway_end(interaction: discord.Interaction, message_id: str):
 @giveaway_group.command(name='reroll', description='Reroll a giveaway winner')
 @app_commands.describe(message_id='The message ID of the giveaway to reroll')
 async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
-    if not interaction.user.guild_permissions.manage_guild and not _is_staff(interaction.user):
+    has_perm = (
+        interaction.user.guild_permissions.manage_guild
+        or interaction.user.get_role(GW_HOST_ROLE) is not None
+        or _is_staff(interaction.user)
+    )
+    if not has_perm:
         return await interaction.response.send_message(
             embed=discord.Embed(description='staff only', color=0xED4245), ephemeral=True
         )
@@ -3091,6 +3109,10 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
         if not gw:
             return await interaction.response.send_message(
                 embed=discord.Embed(description='giveaway not found', color=0xED4245), ephemeral=True
+            )
+        if not gw['ended']:
+            return await interaction.response.send_message(
+                embed=discord.Embed(description="⚠️ that giveaway hasn't ended yet — end it first with `/giveaway end`", color=0xFEE75C), ephemeral=True
             )
         entries = await c.fetch('SELECT user_id FROM giveaway_entries WHERE giveaway_id=$1', gw['id'])
     if not entries:
@@ -3120,7 +3142,11 @@ async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
 @giveaway_group.command(name='addentries', description='Add a bonus entry role')
 @app_commands.describe(role='The role to give bonus entries', entries='Number of bonus entries')
 async def giveaway_addentries(interaction: discord.Interaction, role: discord.Role, entries: int):
-    if not interaction.user.guild_permissions.manage_guild:
+    has_perm = (
+        interaction.user.guild_permissions.manage_guild
+        or interaction.user.get_role(GW_HOST_ROLE) is not None
+    )
+    if not has_perm:
         return await interaction.response.send_message(
             embed=discord.Embed(description='you need Manage Server for that', color=0xED4245), ephemeral=True
         )
@@ -3146,7 +3172,11 @@ async def giveaway_addentries(interaction: discord.Interaction, role: discord.Ro
 @giveaway_group.command(name='removeentries', description='Remove a bonus entry role')
 @app_commands.describe(role='The role to remove from bonus entries')
 async def giveaway_removeentries(interaction: discord.Interaction, role: discord.Role):
-    if not interaction.user.guild_permissions.manage_guild:
+    has_perm = (
+        interaction.user.guild_permissions.manage_guild
+        or interaction.user.get_role(GW_HOST_ROLE) is not None
+    )
+    if not has_perm:
         return await interaction.response.send_message(
             embed=discord.Embed(description='Manage Server required', color=0xED4245), ephemeral=True
         )
@@ -3202,7 +3232,7 @@ async def on_command(ctx):
         try:
             await ctx.reply(
                 embed=discord.Embed(
-                    description=f"slow down — you're sending commands too fast\ncooldown: **{secs}s**",
+                    description=f"⛔ slow down — you're sending commands too fast\ncooldown: **{secs}s**",
                     color=0xED4245
                 ),
                 delete_after=float(secs)
@@ -3279,14 +3309,14 @@ async def on_command_error(ctx, error):
         if 'global rate limit' in str(error):
             return
         try:
-            await ctx.reply(embed=discord.Embed(description='you don\'t have permission to use that', color=0xED4245))
+            await ctx.reply(embed=discord.Embed(description='🚫 you don\'t have permission to use that', color=0xED4245))
         except Exception:
             pass
 
     elif isinstance(error, commands.MissingRequiredArgument):
         try:
             await ctx.reply(embed=discord.Embed(
-                description=f'missing argument: `{error.param.name}`\ncheck `$help` for usage',
+                description=f'⚠️ missing argument: `{error.param.name}` — check `$help` for usage',
                 color=0xFEE75C
             ))
         except Exception:
@@ -3295,7 +3325,7 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.CommandOnCooldown):
         try:
             await ctx.reply(embed=discord.Embed(
-                description=f'slow down — wait **{error.retry_after:.1f}s**',
+                description=f'⏳ slow down — wait **{error.retry_after:.1f}s**',
                 color=0xFEE75C
             ), delete_after=int(error.retry_after) + 1)
         except Exception:
@@ -3305,7 +3335,7 @@ async def on_command_error(ctx, error):
         perms = ', '.join(error.missing_permissions)
         try:
             await ctx.reply(embed=discord.Embed(
-                description=f'i\'m missing permissions to do that: `{perms}`',
+                description=f'⚠️ i\'m missing permissions to do that: `{perms}`',
                 color=0xED4245
             ))
         except Exception:
@@ -3319,7 +3349,7 @@ async def on_command_error(ctx, error):
             await asyncio.sleep(retry)
             try:
                 await ctx.reply(embed=discord.Embed(
-                    description='got rate limited by Discord — try again in a sec',
+                    description='⏳ got rate limited by Discord — try again in a sec',
                     color=0xFEE75C
                 ))
             except Exception:
@@ -3327,7 +3357,7 @@ async def on_command_error(ctx, error):
         elif error.status == 403:
             try:
                 await ctx.reply(embed=discord.Embed(
-                    description='i don\'t have permission to do that here',
+                    description='🚫 i don\'t have permission to do that here',
                     color=0xED4245
                 ))
             except Exception:
@@ -3551,6 +3581,10 @@ async def on_message(message: discord.Message):
 
                 try:
                     async with db.pool.acquire() as c:
+                        await c.execute(
+                            'INSERT INTO verifications (guild_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+                            message.guild.id, message.author.id
+                        )
                         inv_row = await c.fetchrow(
                             'SELECT inviter_id FROM member_invites WHERE guild_id=$1 AND user_id=$2',
                             message.guild.id, message.author.id
