@@ -98,16 +98,86 @@ _bot_ready = False    # guard against duplicate on_ready side-effects
 # ================================================================== rate limiter
 
 class RateLimiter:
+    """
+    Per-action cooldowns + global per-user spam detection.
+    Uses sliding-window counters to auto-suppress command spammers.
+    """
     def __init__(self):
-        self._buckets: dict = defaultdict(dict)
+        self._buckets:   dict = defaultdict(dict)   # action -> {uid: last_ts}
+        self._history:   dict = defaultdict(list)   # uid -> [timestamps]
+        self._suppressed: dict = {}                  # uid -> suppress_until
 
+    # ── per-action cooldown ────────────────────────────────────────
     def check(self, uid: int, action: str, cd: int) -> bool:
+        """Returns True if the action is allowed, False if on cooldown."""
         now  = datetime.now(timezone.utc).timestamp()
         last = self._buckets[action].get(uid, 0)
         if now - last < cd:
             return False
         self._buckets[action][uid] = now
         return True
+
+    def remaining(self, uid: int, action: str, cd: int) -> float:
+        """Seconds left on a cooldown, 0 if not cooling down."""
+        now  = datetime.now(timezone.utc).timestamp()
+        last = self._buckets[action].get(uid, 0)
+        return max(0.0, cd - (now - last))
+
+    # ── global anti-spam gate ──────────────────────────────────────
+    def global_check(self, uid: int,
+                     window: int = 6,
+                     max_cmds: int = 5,
+                     lockout: int = 30) -> tuple[bool, float]:
+        """
+        Sliding-window global limiter.
+        Returns (allowed, suppress_remaining).
+        If a user fires more than max_cmds commands in `window` seconds
+        they get locked out for `lockout` seconds.
+        """
+        now = datetime.now(timezone.utc).timestamp()
+
+        # check if currently suppressed
+        until = self._suppressed.get(uid, 0)
+        if now < until:
+            return False, until - now
+
+        # prune history older than window
+        self._history[uid] = [t for t in self._history[uid] if now - t < window]
+        self._history[uid].append(now)
+
+        if len(self._history[uid]) > max_cmds:
+            self._suppressed[uid] = now + lockout
+            self._history[uid].clear()
+            return False, float(lockout)
+
+        return True, 0.0
+
+    # ── interaction anti-spam (buttons) ───────────────────────────
+    def interaction_check(self, uid: int, window: int = 3, max_hits: int = 4) -> bool:
+        """
+        Lighter version for button interactions — just returns False if spamming.
+        """
+        now = datetime.now(timezone.utc).timestamp()
+        key = f'__btn_{uid}'
+        self._history[key] = [t for t in self._history.get(key, []) if now - t < window]
+        self._history[key].append(now)
+        return len(self._history[key]) <= max_hits
+
+    # ── cleanup (call periodically) ────────────────────────────────
+    def cleanup(self):
+        now = datetime.now(timezone.utc).timestamp()
+        cutoff = now - 300  # 5 minutes
+        for action in list(self._buckets):
+            self._buckets[action] = {
+                uid: ts for uid, ts in self._buckets[action].items()
+                if ts > cutoff
+            }
+        for uid in list(self._history):
+            self._history[uid] = [t for t in self._history[uid] if now - t < 60]
+            if not self._history[uid]:
+                del self._history[uid]
+        self._suppressed = {uid: ts for uid, ts in self._suppressed.items() if ts > now}
+
 
 limiter = RateLimiter()
 
@@ -384,6 +454,7 @@ async def _can_manage(ctx, ticket) -> bool:
 # ================================================================== helpers
 
 async def send_log(guild, title, desc=None, color=0x5865F2, fields=None):
+    """Sends an embed to the log channel with automatic rate-limit retry."""
     try:
         async with db.pool.acquire() as c:
             cfg = await c.fetchrow(
@@ -399,7 +470,17 @@ async def send_log(guild, title, desc=None, color=0x5865F2, fields=None):
             e.description = desc
         for k, v in (fields or {}).items():
             e.add_field(name=k, value=str(v), inline=True)
-        await ch.send(embed=e)
+        for attempt in range(3):
+            try:
+                await ch.send(embed=e)
+                return
+            except discord.HTTPException as http_ex:
+                if http_ex.status == 429:
+                    retry = getattr(http_ex, 'retry_after', 1.0)
+                    logger.warning(f'send_log rate limited — retrying in {retry:.2f}s')
+                    await asyncio.sleep(retry)
+                else:
+                    raise
     except Exception as ex:
         logger.error(f'send_log: {ex}')
 
@@ -816,9 +897,15 @@ class TicketPanel(View):
 
     @discord.ui.button(label='Support', style=ButtonStyle.primary, emoji='🎫', custom_id='btn_support')
     async def support(self, interaction: discord.Interaction, _):
-        if not limiter.check(interaction.user.id, 'open', 10):
+        if not limiter.interaction_check(interaction.user.id):
             return await interaction.response.send_message(
-                embed=discord.Embed(description='slow down a bit', color=0xFEE75C),
+                embed=discord.Embed(description='you\'re clicking too fast — slow down', color=0xFEE75C),
+                ephemeral=True
+            )
+        if not limiter.check(interaction.user.id, 'open', 10):
+            rem = limiter.remaining(interaction.user.id, 'open', 10)
+            return await interaction.response.send_message(
+                embed=discord.Embed(description=f'you opened a ticket recently — wait **{int(rem)}s**', color=0xFEE75C),
                 ephemeral=True
             )
         try:
@@ -915,9 +1002,14 @@ class ControlView(View):
 
     @discord.ui.button(label='Claim', style=ButtonStyle.green, emoji='✋', custom_id='btn_claim')
     async def claim(self, interaction: discord.Interaction, _):
-        if not limiter.check(interaction.user.id, 'claim', 2):
+        if not limiter.interaction_check(interaction.user.id):
             return await interaction.response.send_message(
-                embed=discord.Embed(description='slow down', color=0xFEE75C), ephemeral=True
+                embed=discord.Embed(description='you\'re clicking too fast', color=0xFEE75C), ephemeral=True
+            )
+        if not limiter.check(interaction.user.id, 'claim', 2):
+            rem = limiter.remaining(interaction.user.id, 'claim', 2)
+            return await interaction.response.send_message(
+                embed=discord.Embed(description=f'slow down — wait **{rem:.1f}s**', color=0xFEE75C), ephemeral=True
             )
         if not _is_staff(interaction.user):
             return await interaction.response.send_message(
@@ -969,9 +1061,14 @@ class ControlView(View):
 
     @discord.ui.button(label='Unclaim', style=ButtonStyle.gray, emoji='↩️', custom_id='btn_unclaim')
     async def unclaim(self, interaction: discord.Interaction, _):
-        if not limiter.check(interaction.user.id, 'unclaim', 2):
+        if not limiter.interaction_check(interaction.user.id):
             return await interaction.response.send_message(
-                embed=discord.Embed(description='slow down', color=0xFEE75C), ephemeral=True
+                embed=discord.Embed(description='you\'re clicking too fast', color=0xFEE75C), ephemeral=True
+            )
+        if not limiter.check(interaction.user.id, 'unclaim', 2):
+            rem = limiter.remaining(interaction.user.id, 'unclaim', 2)
+            return await interaction.response.send_message(
+                embed=discord.Embed(description=f'slow down — wait **{rem:.1f}s**', color=0xFEE75C), ephemeral=True
             )
         async with db.pool.acquire() as c:
             ticket = await c.fetchrow(
@@ -1071,7 +1168,8 @@ async def close_cmd(ctx):
     if not ctx.channel.name.startswith('ticket-'):
         return await ctx.reply(embed=discord.Embed(description='not a ticket channel', color=0xED4245))
     if not limiter.check(ctx.author.id, 'close', 3):
-        return await ctx.reply(embed=discord.Embed(description='wait a sec', color=0xFEE75C))
+        rem = limiter.remaining(ctx.author.id, 'close', 3)
+        return await ctx.reply(embed=discord.Embed(description=f'wait **{rem:.1f}s** before closing again', color=0xFEE75C))
     async with db.pool.acquire() as c:
         ticket = await c.fetchrow('SELECT * FROM tickets WHERE channel_id=$1', ctx.channel.id)
     if not ticket:
@@ -1555,7 +1653,7 @@ async def config_cmd(ctx):
     e.add_field(name='**Verified Role**',   value=verified_r.mention   if verified_r   else 'not found', inline=True)
     e.add_field(name='**Member Role**',     value=member_r.mention     if member_r     else 'not found', inline=True)
 
-    e.add_field(name='**Uptime**',  value=fmt_uptime(datetime.now(timezone.utc) - BOT_START), inline=True)  # uptime
+    e.add_field(name='**Uptime**',  value=fmt_uptime(datetime.now(timezone.utc) - BOT_START), inline=True)
     e.add_field(name='**Latency**', value=f'{round(bot.latency * 1000)}ms', inline=True)
     footer = 'finish setup with $setcategory and $setlogs' if not cfg else f'requested by {ctx.author.display_name}'
     e.set_footer(text=footer)
@@ -1669,7 +1767,7 @@ async def invites_cmd(ctx, member: discord.Member = None):
         f'**Verified** ╸  {verified}'
     )
     e.set_thumbnail(url=member.display_avatar.url)
-    e.set_footer(text=f'Requested by {ctx.author.display_name}')
+    e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1774,7 +1872,7 @@ async def whoinvited_cmd(ctx, member: discord.Member = None):
     inviter = ctx.guild.get_member(row['inviter_id'])
     e = discord.Embed(color=0x5865F2)
     e.description = f'{member.mention} was invited by {inviter.mention if inviter else str(row["inviter_id"])}'
-    e.set_footer(text=f'Requested by {ctx.author.display_name}')
+    e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 @bot.command(name='lb', aliases=['leaderboardinvites', 'lbi', 'invitelb'])
@@ -1802,7 +1900,7 @@ async def invited_cmd(ctx, member: discord.Member = None):
         e = discord.Embed(color=0x5865F2)
         e.description = f"## {member.display_name} hasn't invited anyone yet"
         e.set_thumbnail(url=member.display_avatar.url)
-        e.set_footer(text=f'Requested by {ctx.author.display_name}')
+        e.set_footer(text=f'requested by {ctx.author.display_name}')
         return await ctx.reply(embed=e)
 
     verified_role = ctx.guild.get_role(VERIFIED_ROLE)
@@ -1842,7 +1940,7 @@ async def invited_cmd(ctx, member: discord.Member = None):
         + (f'\n... and {total - 20} more' if total > 20 else '')
     )
     e.set_thumbnail(url=member.display_avatar.url)
-    e.set_footer(text=f'Requested by {ctx.author.display_name}')
+    e.set_footer(text=f'requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -1890,6 +1988,8 @@ async def clearinvites_cmd(ctx, target: str = None):
 async def on_message_delete(message: discord.Message):
     if message.author.bot:
         return
+    if len(snipe_cache) >= 500:
+        snipe_cache.pop(next(iter(snipe_cache)), None)
     snipe_cache[message.channel.id] = {
         'content':     message.content or '[embed or attachment]',
         'author':      message.author,
@@ -1902,6 +2002,8 @@ async def on_message_delete(message: discord.Message):
 async def on_message_edit(before: discord.Message, after: discord.Message):
     if before.author.bot or before.content == after.content:
         return
+    if len(esnipe_cache) >= 500:
+        esnipe_cache.pop(next(iter(esnipe_cache)), None)
     esnipe_cache[before.channel.id] = {
         'before': before.content or '[no content]',
         'after':  after.content  or '[no content]',
@@ -3082,12 +3184,42 @@ async def status_loop():
     await bot.change_presence(activity=act)
 
 
+@tasks.loop(minutes=5)
+async def limiter_cleanup():
+    """Prune stale rate limit entries every 5 minutes to prevent memory growth."""
+    limiter.cleanup()
+
+
+@bot.event
+async def on_command(ctx):
+    """
+    Global anti-spam gate — fires before every $ command.
+    Auto-suppresses users sending commands too fast.
+    """
+    allowed, remaining = limiter.global_check(ctx.author.id)
+    if not allowed:
+        secs = int(remaining)
+        try:
+            await ctx.reply(
+                embed=discord.Embed(
+                    description=f"slow down — you're sending commands too fast\ncooldown: **{secs}s**",
+                    color=0xED4245
+                ),
+                delete_after=float(secs)
+            )
+        except Exception:
+            pass
+        raise commands.CheckFailure('global rate limit')
+
+
 @bot.event
 async def on_ready():
     global _bot_ready
     logger.info(f'logged in as {bot.user} in {len(bot.guilds)} guild(s)')
     if not status_loop.is_running():
         status_loop.start()
+    if not limiter_cleanup.is_running():
+        limiter_cleanup.start()
 
     if not _bot_ready:
         _bot_ready = True
@@ -3135,14 +3267,76 @@ async def on_ready():
 
 @bot.event
 async def on_command_error(ctx, error):
+    # unwrap command invoke errors
+    if isinstance(error, commands.CommandInvokeError):
+        error = error.original
+
     if isinstance(error, commands.CommandNotFound):
         return  # silently swallow unknown commands
+
     if isinstance(error, commands.CheckFailure):
-        await ctx.reply(embed=discord.Embed(description='no perms', color=0xED4245))
+        # global rate limit already replied — don't double-reply
+        if 'global rate limit' in str(error):
+            return
+        try:
+            await ctx.reply(embed=discord.Embed(description='you don\'t have permission to use that', color=0xED4245))
+        except Exception:
+            pass
+
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.reply(embed=discord.Embed(description=f'missing: `{error.param.name}`', color=0xFEE75C))
+        try:
+            await ctx.reply(embed=discord.Embed(
+                description=f'missing argument: `{error.param.name}`\ncheck `$help` for usage',
+                color=0xFEE75C
+            ))
+        except Exception:
+            pass
+
+    elif isinstance(error, commands.CommandOnCooldown):
+        try:
+            await ctx.reply(embed=discord.Embed(
+                description=f'slow down — wait **{error.retry_after:.1f}s**',
+                color=0xFEE75C
+            ), delete_after=int(error.retry_after) + 1)
+        except Exception:
+            pass
+
+    elif isinstance(error, commands.BotMissingPermissions):
+        perms = ', '.join(error.missing_permissions)
+        try:
+            await ctx.reply(embed=discord.Embed(
+                description=f'i\'m missing permissions to do that: `{perms}`',
+                color=0xED4245
+            ))
+        except Exception:
+            pass
+
+    elif isinstance(error, discord.HTTPException):
+        if error.status == 429:
+            # Discord is rate limiting us — log it and wait
+            retry = getattr(error, 'retry_after', 1.0)
+            logger.warning(f'Discord rate limit hit on {ctx.command} — retry after {retry:.2f}s')
+            await asyncio.sleep(retry)
+            try:
+                await ctx.reply(embed=discord.Embed(
+                    description='got rate limited by Discord — try again in a sec',
+                    color=0xFEE75C
+                ))
+            except Exception:
+                pass
+        elif error.status == 403:
+            try:
+                await ctx.reply(embed=discord.Embed(
+                    description='i don\'t have permission to do that here',
+                    color=0xED4245
+                ))
+            except Exception:
+                pass
+        else:
+            logger.error(f'{ctx.command}: HTTP {error.status} — {error.text}')
+
     else:
-        logger.error(f'{ctx.command}: {error}')
+        logger.error(f'{ctx.command}: {type(error).__name__}: {error}')
 
 
 @bot.event
@@ -3162,7 +3356,7 @@ async def on_member_join(member: discord.Member):
             av_bytes = await member.display_avatar.replace(size=256, format='png').read()
             card     = make_welcome_card(av_bytes, member.display_name, guild.name, guild.member_count)
             await welcome_ch.send(
-                f'{member.mention} Welcome to **{guild.name}** Hope you enjoy your stay!',
+                f'{member.mention} welcome to **{guild.name}**!',
                 file=discord.File(card, filename='welcome.png')
             )
         except Exception as ex:
@@ -3172,9 +3366,8 @@ async def on_member_join(member: discord.Member):
         e = discord.Embed(color=0x57F287)
         e.set_author(name=f'Welcome to {guild.name}!', icon_url=guild.icon.url if guild.icon else None)
         e.description = (
-            f'Hey {member.mention}!\n\n'
-            f'Welcome to **{guild.name}** — hope you enjoy your stay!\n\n'
-            f'Head over to the server to get started.'
+            f'hey, welcome to **{guild.name}**!\n\n'
+            f'make sure to check the rules and have fun'
         )
         e.set_thumbnail(url=member.display_avatar.url)
         await member.send(embed=e)
