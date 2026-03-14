@@ -13,6 +13,7 @@ import time as _time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from collections import defaultdict
+
 import discord
 import aiohttp
 import aiohttp.web
@@ -1053,7 +1054,7 @@ class ControlView(View):
         if not limiter.check(interaction.user.id, 'claim', 2):
             rem = limiter.remaining(interaction.user.id, 'claim', 2)
             return await interaction.response.send_message(
-                embed=discord.Embed(description=f'slow down — wait **{rem:.1f}s**', color=0xFEE75C), ephemeral=True
+                embed=discord.Embed(title='⏳  Slow Down', description=f'Please wait **{rem:.1f}s** before trying again.', color=0xFEE75C), ephemeral=True
             )
         gw_host_r = interaction.guild.get_role(GW_HOST_ROLE)
         is_gw_host = gw_host_r is not None and gw_host_r in interaction.user.roles
@@ -1792,7 +1793,7 @@ async def setlogs_cmd(ctx, channel: discord.TextChannel = None):
 async def config_cmd(ctx):
     async with db.pool.acquire() as c:
         cfg = await c.fetchrow('SELECT * FROM config WHERE guild_id=$1', ctx.guild.id)
-    e = discord.Embed(title=f'⚙️  config  —  {ctx.guild.name}', color=TIER_COLOR['support'])
+    e = discord.Embed(title='⚙️  Bot Configuration', color=TIER_COLOR['support'])
 
     cat  = ctx.guild.get_channel(cfg['ticket_category_id']) if cfg and cfg.get('ticket_category_id') else None
     logs = ctx.guild.get_channel(cfg['log_channel_id'])     if cfg and cfg.get('log_channel_id')     else None
@@ -1905,7 +1906,7 @@ async def blacklists_cmd(ctx):
     e = discord.Embed(title=f'🚫  Blacklist  ({len(rows)})', color=0xED4245)
     e.set_author(name=ctx.guild.name, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
     e.description = '\n'.join(lines)
-    e.set_footer(text=f'requested by {ctx.author.display_name}')
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2038,11 +2039,17 @@ async def whoinvited_cmd(ctx, member: discord.Member = None):
     if not row or not row['inviter_id']:
         return await ctx.reply(embed=discord.Embed(description=f'No invite data found for {member.mention}', color=0x5865F2))
     inviter = ctx.guild.get_member(row['inviter_id'])
-    e = discord.Embed(color=0x5865F2)
-    e.title       = '📨  Invite Lookup'
-    e.description = f'{member.mention} was invited by {inviter.mention if inviter else f'`{row["inviter_id"]}`'}.'
-    e.set_footer(text=f'requested by {ctx.author.display_name}')
+    inviter_str = inviter.mention if inviter else f'`{row["inviter_id"]}`'
+    e = discord.Embed(title='📨  Invite Lookup', color=0x5865F2)
+    e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+    e.set_thumbnail(url=member.display_avatar.url)
+    e.description = (
+        f'**{member.mention}** was invited by\n'
+        f'> {inviter_str}'
+    )
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
+
 
 @bot.command(name='lb', aliases=['leaderboardinvites', 'lbi', 'invitelb'])
 async def lb_cmd(ctx):
@@ -2192,12 +2199,12 @@ async def snipe_cmd(ctx):
     data = snipe_cache.get(ctx.channel.id)
     if not data:
         return await ctx.reply(embed=discord.Embed(title='👻  Snipe', description='There are no recently deleted messages in this channel.', color=0x5865F2))
-    e = discord.Embed(color=0x5865F2)
+    e = discord.Embed(title='👻  Deleted Message', color=0x5865F2)
     e.set_author(name=data['author'].display_name, icon_url=data['avatar'])
     e.description = data['content']
     if data.get('attachments'):
-        e.add_field(name='**Attachments**', value='\n'.join(data['attachments']), inline=False)
-    e.set_footer(text=f'👻 sniped by {ctx.author.display_name}')
+        e.add_field(name='📎  Attachments', value='\n'.join(data['attachments']), inline=False)
+    e.set_footer(text=f'Sniped by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2206,11 +2213,11 @@ async def esnipe_cmd(ctx):
     data = esnipe_cache.get(ctx.channel.id)
     if not data:
         return await ctx.reply(embed=discord.Embed(title='👻  Edit Snipe', description='There are no recently edited messages in this channel.', color=0x5865F2))
-    e = discord.Embed(color=0x5865F2)
+    e = discord.Embed(title='👻  Edited Message', color=0xFEE75C)
     e.set_author(name=data['author'].display_name, icon_url=data['avatar'])
-    e.add_field(name='📤 before', value=data['before'][:1024], inline=False)
-    e.add_field(name='📥 after',  value=data['after'][:1024],  inline=False)
-    e.set_footer(text=f'👻 sniped by {ctx.author.display_name}')
+    e.add_field(name='📤  Before', value=data['before'][:1024], inline=False)
+    e.add_field(name='📥  After',  value=data['after'][:1024],  inline=False)
+    e.set_footer(text=f'Sniped by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2219,7 +2226,6 @@ async def ping_cmd(ctx):
     latency = round(bot.latency * 1000)
     bar = '█' * min(10, latency // 10) + '░' * max(0, 10 - latency // 10)
     e = discord.Embed(color=0x57F287 if latency < 150 else 0xFEE75C if latency < 300 else 0xED4245)
-    e.title       = '🏓  Latency'
     e.title       = '🏓  Latency'
     e.description   = f'`{bar}` **{latency}ms**'
     e.set_footer(text=f'Uptime: {fmt_uptime(datetime.now(timezone.utc) - BOT_START)}')
@@ -2284,7 +2290,7 @@ async def userinfo_cmd(ctx, member: discord.Member = None):
         value=' '.join(roles[:15]) + (' ...' if len(roles) > 15 else '') if roles else 'none',
         inline=False
     )
-    e.set_footer(text=f'requested by {ctx.author.display_name}')
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2311,7 +2317,7 @@ async def serverinfo_cmd(ctx):
     e.add_field(name='🚀  Boost Level',   value=str(guild.premium_tier),  inline=True)
     e.add_field(name='💎  Boosts',        value=str(guild.premium_subscription_count), inline=True)
     e.add_field(name='😄  Emojis',        value=f'{len(guild.emojis)}/{guild.emoji_limit}', inline=True)
-    e.set_footer(text=f'requested by {ctx.author.display_name}')
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2328,7 +2334,7 @@ async def membercount_cmd(ctx):
     e.add_field(name='🧑  Humans',  value=f'{humans:,}', inline=True)
     e.add_field(name='🤖  Bots',    value=str(bots),     inline=True)
     e.add_field(name='🟢  Online',  value=str(online),   inline=True)
-    e.set_footer(text=f'requested by {ctx.author.display_name}')
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2345,7 +2351,7 @@ async def newest_cmd(ctx):
     for i, m in enumerate(members, 1):
         lines.append(f'**{i}.** {m.mention}')
     e.description = '\n'.join(lines)
-    e.set_footer(text=f'requested by {ctx.author.display_name}')
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2361,7 +2367,7 @@ async def oldest_cmd(ctx):
     for i, m in enumerate(members, 1):
         lines.append(f'**{i}.** {m.mention}')
     e.description = '\n'.join(lines)
-    e.set_footer(text=f'requested by {ctx.author.display_name}')
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2374,7 +2380,7 @@ async def botlist_cmd(ctx):
     e = discord.Embed(title=f'🤖  Bots  ({len(bots)})', color=0x5865F2)
     e.set_author(name=ctx.guild.name, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
     e.description = '\n'.join(lines)
-    e.set_footer(text=f'requested by {ctx.author.display_name}')
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2406,7 +2412,7 @@ async def ticketstats_cmd(ctx):
     e.add_field(name='🔒  Closed',       value=str(closed),     inline=True)
     e.add_field(name='📊  Completion',   value=completion,      inline=True)
     e.add_field(name='⭐  Rating',       value=f'{stars}  {avg_rating}' if stars else avg_rating, inline=False)
-    e.set_footer(text='Run $rateme inside a closed ticket to request a rating from the creator.')
+    e.set_footer(text='Run $rateme inside a ticket to request a rating from the creator.')
     await ctx.reply(embed=e)
 
 
@@ -2563,14 +2569,14 @@ async def activemm_cmd(ctx):
             )
 
     if not sections:
-        return await ctx.reply(embed=discord.Embed(description='no middlemen found', color=0x5865F2))
+        return await ctx.reply(embed=discord.Embed(title='⚖️  Active Middlemen', description='No middlemen are currently online.', color=0x5865F2))
 
     e = discord.Embed(
-        title=f'⚖️  active middlemen  —  {ctx.guild.name}',
+        title='⚖️  Active Middlemen',
         color=0x57F287 if total_online > 0 else 0x747F8D
     )
     e.description = '\n\n'.join(sections)
-    e.set_footer(text=f'{total_online}/{total_mm} online  •  requested by {ctx.author.display_name}')
+    e.set_footer(text=f'{total_online}/{total_mm} online  ·  Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2642,16 +2648,55 @@ HELP_PAGES = [
                 ),
             },
             {
-                'name':  '╔══════ 📋  Available Permission Names',
+                'name':  '╔══════ 💬  Text Permissions',
                 'value': (
-                    '╚► Pass any of these as the `<perm>` argument.\n'
+                    '╚► All aliases accepted.\n'
                     '┃\n'
-                    '┣ **Text** ——— `send` `read` `embed` `attach` `react` `history`\n'
-                    '┃              `mentions` `pin` `tts` `polls` `slash` `external` `stickers`\n'
-                    '┣ **Voice** ——— `voice` `speak` `stream` `mute` `deafen` `move`\n'
-                    '┃              `vad` `soundboard` `activities` `priority` `stage`\n'
-                    '┗ **Manage** —— `slow` `manage` `webhooks` `manage_perms`\n'
-                    '               `threads` `private_threads` `send_in_threads`'
+                    '┣ `send` / `send_messages`\n'
+                    '┣ `read` / `view` / `view_channel` / `read_messages`\n'
+                    '┣ `history` / `read_history` / `read_message_history`\n'
+                    '┣ `embed` / `embeds` / `embed_links`\n'
+                    '┣ `attach` / `attach_files`\n'
+                    '┣ `react` / `add_reactions`\n'
+                    '┣ `mentions` / `mention_everyone`\n'
+                    '┣ `external` / `external_emojis` / `use_external_emojis`\n'
+                    '┣ `stickers` / `use_external_stickers`\n'
+                    '┣ `tts` / `send_tts_messages`\n'
+                    '┣ `polls` / `send_polls`\n'
+                    '┣ `slash` / `use_application_commands`\n'
+                    '┣ `threads` / `create_public_threads`\n'
+                    '┣ `private_threads` / `create_private_threads`\n'
+                    '┗ `send_in_threads` / `send_messages_in_threads`'
+                ),
+            },
+            {
+                'name':  '╔══════ 🎙️  Voice Permissions',
+                'value': (
+                    '╚► All aliases accepted.\n'
+                    '┃\n'
+                    '┣ `voice` / `connect`\n'
+                    '┣ `speak` / `talk`\n'
+                    '┣ `stream` / `video` / `screen`\n'
+                    '┣ `mute` / `mute_members`\n'
+                    '┣ `deafen` / `deafen_members`\n'
+                    '┣ `move` / `move_members`\n'
+                    '┣ `vad` / `voice_activity` / `use_voice_activation`\n'
+                    '┣ `soundboard` / `use_soundboard`\n'
+                    '┣ `external_sounds` / `use_external_sounds`\n'
+                    '┣ `activities` / `embedded_activities` / `use_embedded_activities`\n'
+                    '┣ `priority` / `priority_speaker`\n'
+                    '┗ `stage` / `request_to_speak`'
+                ),
+            },
+            {
+                'name':  '╔══════ 🔧  Manage Permissions',
+                'value': (
+                    '╚► All aliases accepted.\n'
+                    '┃\n'
+                    '┣ `pin` / `manage` / `manage_messages`\n'
+                    '┣ `slow` / `manage_channels`\n'
+                    '┣ `webhooks` / `manage_webhooks`\n'
+                    '┗ `manage_perms` / `manage_permissions`'
                 ),
             },
             {
@@ -2876,7 +2921,7 @@ async def createcustomlink_cmd(ctx):
     e.set_footer(text='never expires  •  unlimited uses')
     try:
         await ctx.author.send(embed=e)
-        await ctx.reply(embed=discord.Embed(description='✅ Your invite link has been sent to your DMs.', color=0x57F287))
+        await ctx.reply(embed=discord.Embed(title='✅  Invite Link Created', description='Your personal invite link has been sent to your DMs. Anyone who joins using it will count towards your invite stats.', color=0x57F287))
     except discord.Forbidden:
         await ctx.reply(embed=discord.Embed(description='Unable to send you a DM. Please make sure your DMs are open and try again.', color=0xFEE75C))
 
@@ -2913,22 +2958,22 @@ async def botstats_cmd(ctx):
     e.add_field(
         name='📅  Today',
         value=(
-            f'`{cmds}` commands used\n'
-            f'`{tickets}` tickets opened\n'
-            f'`{gws}` giveaways started\n'
-            f'`{verifs}` verifications\n'
-            f'`{total_msgs}` messages sent\n'
-            f'`{active_users}` active members'
+            f'📟  Commands Used : **{cmds}**\n'
+            f'🎫  Tickets Opened : **{tickets}**\n'
+            f'🎉  Giveaways Started : **{gws}**\n'
+            f'✅  Verifications : **{verifs}**\n'
+            f'💬  Messages Sent : **{total_msgs}**\n'
+            f'👥  Active Members : **{active_users}**'
         ),
         inline=True
     )
     e.add_field(
         name='📈  All Time',
         value=(
-            f'`{total_tickets}` total tickets\n'
-            f'`{open_tickets}` currently open\n'
-            f'`{active_gws}` active giveaways\n'
-            f'`{total_verifs}` total verifications'
+            f'🎫  Total Tickets : **{total_tickets}**\n'
+            f'🔓  Open Tickets : **{open_tickets}**\n'
+            f'🎉  Active Giveaways : **{active_gws}**\n'
+            f'✅  Total Verifications : **{total_verifs}**'
         ),
         inline=True
     )
@@ -2941,7 +2986,7 @@ async def botstats_cmd(ctx):
 async def activity_cmd(ctx):
     counts = message_counts.get(ctx.guild.id, {})
     if not counts:
-        return await ctx.reply(embed=discord.Embed(description='No message activity has been tracked yet today.', color=0xFEE75C))
+        return await ctx.reply(embed=discord.Embed(title='💬  Message Activity', description='No message activity has been tracked yet today.', color=0x5865F2))
     sorted_users = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:10]
     total = sum(counts.values())
     lines = []
