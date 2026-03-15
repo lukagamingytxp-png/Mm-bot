@@ -62,17 +62,17 @@ TIER_COLOR = {
 }
 
 TIER_LABEL = {
-    'lowtier':  'Low Tier  •  100–900 RBX',
-    'midtier':  'Mid Tier  •  1K–3K RBX',
-    'hightier': 'High Tier  •  3.1K–5K+ RBX',
+    'lowtier':  'Low Tier  •  Up to 100 RBX',
+    'midtier':  'Mid Tier  •  100–500 RBX',
+    'hightier': 'High Tier  •  500+ RBX',
     'support':  'Support',
     'reward':   'Reward Claim',
 }
 
 TIER_SLUG = {
-    'lowtier':  '100-900rbx',
-    'midtier':  '1k-3krbx',
-    'hightier': '3k-5krbx',
+    'lowtier':  'lowtier',
+    'midtier':  'midtier',
+    'hightier': 'hightier',
     'support':  'support',
     'reward':   'reward',
 }
@@ -86,7 +86,7 @@ esnipe_cache   = {}   # channel_id -> {before, after, author, avatar}
 
 # ── daily stats (reset at midnight UTC) ─────────────────────────────
 from collections import defaultdict
-daily_stats    = defaultdict(lambda: {'commands': 0, 'tickets': 0, 'giveaways': 0, 'verifications': 0})
+daily_stats    = defaultdict(lambda: {'commands': 0, 'tickets': 0, 'verifications': 0})
 message_counts = defaultdict(lambda: defaultdict(int))  # guild_id -> user_id -> count
 STATS_DATE     = datetime.now(timezone.utc).date()
 
@@ -300,36 +300,6 @@ class Database:
                     closed   INT DEFAULT 0,
                     PRIMARY KEY (guild_id, user_id)
                 )''',
-                '''CREATE TABLE IF NOT EXISTS giveaways (
-                    id               SERIAL PRIMARY KEY,
-                    guild_id         BIGINT,
-                    channel_id       BIGINT,
-                    message_id       BIGINT,
-                    prize            TEXT,
-                    winners_count    INT DEFAULT 1,
-                    host_id          BIGINT,
-                    required_role_id BIGINT,
-                    image_url        TEXT,
-                    ends_at          TIMESTAMPTZ,
-                    ended            BOOLEAN DEFAULT FALSE
-                )''',
-                '''CREATE TABLE IF NOT EXISTS giveaway_entries (
-                    id          SERIAL PRIMARY KEY,
-                    giveaway_id INT REFERENCES giveaways(id) ON DELETE CASCADE,
-                    user_id     BIGINT
-                )''',
-                '''CREATE TABLE IF NOT EXISTS giveaway_last_winners (
-                    guild_id   BIGINT,
-                    prize      TEXT,
-                    winner_ids BIGINT[],
-                    PRIMARY KEY (guild_id, prize)
-                )''',
-                '''CREATE TABLE IF NOT EXISTS giveaway_bonus_roles (
-                    guild_id BIGINT,
-                    role_id  BIGINT,
-                    entries  INT DEFAULT 1,
-                    PRIMARY KEY (guild_id, role_id)
-                )''',
                 '''CREATE TABLE IF NOT EXISTS ticket_ratings (
                     guild_id   BIGINT,
                     ticket_id  TEXT,
@@ -466,10 +436,6 @@ async def _can_manage(ctx, ticket) -> bool:
         r = ctx.guild.get_role(ROLES[ticket['tier']])
         if r and r in ctx.author.roles:
             return True
-    if ticket.get('tier') == 'reward':
-        gw_r = ctx.guild.get_role(GW_HOST_ROLE)
-        if gw_r and gw_r in ctx.author.roles:
-            return True
     if ticket.get('claimed_by') == ctx.author.id:
         return True
     return False
@@ -518,12 +484,6 @@ async def claim_lock(channel, claimer, creator=None, ticket_type='middleman'):
             ow = channel.overwrites_for(r)
             ow.send_messages = False
             await channel.set_permissions(r, overwrite=ow)
-    # Also lock GW host role
-    gw_r = channel.guild.get_role(GW_HOST_ROLE)
-    if gw_r:
-        ow = channel.overwrites_for(gw_r)
-        ow.send_messages = False
-        await channel.set_permissions(gw_r, overwrite=ow)
     # Explicitly allow claimer and creator
     await channel.set_permissions(claimer, read_messages=True, send_messages=True)
     if creator and creator.id != claimer.id:
@@ -538,12 +498,6 @@ async def claim_unlock(channel, old_claimer=None, ticket_type='middleman'):
             ow = channel.overwrites_for(r)
             ow.send_messages = True
             await channel.set_permissions(r, overwrite=ow)
-    # Restore GW host role
-    gw_r = channel.guild.get_role(GW_HOST_ROLE)
-    if gw_r:
-        ow = channel.overwrites_for(gw_r)
-        ow.send_messages = True
-        await channel.set_permissions(gw_r, overwrite=ow)
     # Remove individual overwrite from old claimer (back to role-based)
     if old_claimer:
         await channel.set_permissions(old_claimer, read_messages=True, send_messages=None)
@@ -613,7 +567,7 @@ async def pre_open_checks(interaction, guild, user):
         return False
     if not cfg or not cfg['ticket_category_id']:
         await interaction.followup.send(
-            embed=discord.Embed(description="⚠️ tickets aren't fully set up yet — ping a staff member", color=0xFEE75C),
+            embed=discord.Embed(description='⚠️ The bot is not fully set up yet. Please contact a staff member.', color=0xFEE75C),
             ephemeral=True
         )
         return False
@@ -650,8 +604,8 @@ async def save_transcript(channel, ticket, closer):
         filename=f"transcript-{ticket['ticket_id']}.txt"
     )
     msg_count = len(msgs)
-    e = discord.Embed(title='🔒  ticket closed', color=0xED4245)
-    e.add_field(name='🎫 ticket',    value=f"#{ticket['ticket_id']}",         inline=True)
+    e = discord.Embed(title='🔒  Ticket Closed', color=0xED4245)
+    e.add_field(name='🎫  Ticket',    value=f"#{ticket['ticket_id']}",         inline=True)
     e.add_field(name='📋  Type',       value=f"{ticket['ticket_type'].title()} / {ticket.get('tier', '-').title()}", inline=True)
     e.add_field(name='💬  Messages',   value=str(msg_count),                    inline=True)
     e.add_field(name='👤  Opened By',  value=opener.mention if opener else 'Unknown', inline=True)
@@ -660,55 +614,6 @@ async def save_transcript(channel, ticket, closer):
         e.add_field(name='✋  Claimed By', value=claimer.mention, inline=True)
     await lc.send(embed=e, file=file)
 
-
-# ================================================================== nuclear random
-
-def _nuke_seed(ref_list: list) -> int:
-    """Cryptographically seeded random seed for giveaway winner selection."""
-    parts = [
-        os.urandom(64),
-        str(_time.time_ns()).encode(),
-        str(_time.perf_counter_ns()).encode(),
-        secrets.token_bytes(64),
-        struct.pack('>Q', id(ref_list)),
-        struct.pack('>Q', id(_time.time)),
-        hashlib.sha256(''.join(str(u) for u in ref_list).encode()).digest(),
-    ]
-    h = b''.join(parts)
-    for _ in range(3):
-        h = hashlib.sha512(h + os.urandom(32)).digest()
-    return int.from_bytes(h, 'big')
-
-
-def _pick_winners(pool: list, unique_users: list, num_win: int) -> list:
-    """7-pass Fisher-Yates shuffle with nuclear seed, returns list of winner IDs."""
-    weighted = list(pool)
-    for _ in range(7):
-        rng = random.Random(_nuke_seed(weighted))
-        for i in range(len(weighted) - 1, 0, -1):
-            j = rng.randint(0, i)
-            weighted[i], weighted[j] = weighted[j], weighted[i]
-
-    pick_rng = random.Random(_nuke_seed(weighted))
-    offset   = pick_rng.randint(0, max(len(weighted) - 1, 0))
-    rotated  = weighted[offset:] + weighted[:offset]
-
-    winners = []
-    used    = set()
-    for u in rotated:
-        if u not in used:
-            winners.append(u)
-            used.add(u)
-        if len(winners) == num_win:
-            break
-    if len(winners) < num_win:
-        for u in unique_users:
-            if u not in used:
-                winners.append(u)
-                used.add(u)
-            if len(winners) == num_win:
-                break
-    return winners
 
 
 # ================================================================== UI components
@@ -729,7 +634,7 @@ class MiddlemanModal(Modal, title='Middleman Request'):
     async def on_submit(self, interaction: discord.Interaction):
         if not limiter.check(interaction.user.id, 'open', 10):
             return await interaction.response.send_message(
-                embed=discord.Embed(description='slow down a bit', color=0xFEE75C),
+                embed=discord.Embed(title='⏳  Slow Down', description='You are opening tickets too fast. Please wait before trying again.', color=0xFEE75C),
                 ephemeral=True
             )
         try:
@@ -743,7 +648,7 @@ class MiddlemanModal(Modal, title='Middleman Request'):
             logger.error(f'pre_open_checks: {ex}')
             try:
                 await interaction.followup.send(
-                    embed=discord.Embed(description='something went wrong, try again', color=0xED4245),
+                    embed=discord.Embed(description='Something went wrong. Please try again or contact a staff member.', color=0xED4245),
                     ephemeral=True
                 )
             except Exception:
@@ -797,7 +702,7 @@ class MiddlemanModal(Modal, title='Middleman Request'):
                 ping += f' {tier_r.mention}'
             await channel.send(content=ping, embed=e, view=ControlView())
             await interaction.followup.send(
-                embed=discord.Embed(description=f'✅ Your ticket has been opened — {channel.mention}', color=0x57F287),
+                embed=discord.Embed(title='✅  Ticket Opened', description=f'Your ticket has been created — {channel.mention}', color=0x57F287),
                 ephemeral=True
             )
             await send_log(guild, 'Ticket Opened',
@@ -819,9 +724,9 @@ class TierSelect(Select):
         super().__init__(
             placeholder='pick your trade value range',
             options=[
-                discord.SelectOption(label='Low Tier  •  100–900 RBX',   value='lowtier',  emoji='💎', description='trades under 900 rbx'),
-                discord.SelectOption(label='Mid Tier  •  1K–3K RBX',     value='midtier',  emoji='💰', description='1k to 3k rbx range'),
-                discord.SelectOption(label='High Tier  •  3.1K–5K+ RBX', value='hightier', emoji='💸', description='3.1k+ rbx, senior staff only'),
+                discord.SelectOption(label='Low Tier  •  Up to 100 RBX', value='lowtier',  emoji='💎', description='Small trades up to 100 RBX  ·  Trial MM and above'),
+                discord.SelectOption(label='Mid Tier  •  100–500 RBX',    value='midtier',  emoji='💰', description='Medium trades 100–500 RBX  ·  Middleman and above'),
+                discord.SelectOption(label='High Tier  •  500+ RBX',      value='hightier', emoji='💸', description='Large trades 500+ RBX  ·  Pro Middleman and above'),
             ]
         )
 
@@ -833,15 +738,13 @@ class RewardModal(Modal, title='Claim a Reward'):
     def __init__(self, reward_type):
         super().__init__()
         self.rtype = reward_type
-        self.what  = TextInput(label='What are you claiming?', placeholder='describe what you won', required=True)
-        self.proof = TextInput(label='Proof', placeholder='message link, screenshot link, etc.', style=discord.TextStyle.paragraph, required=True)
+        self.what  = TextInput(label='What are you claiming?', placeholder='Describe what you won', required=True)
         self.add_item(self.what)
-        self.add_item(self.proof)
 
     async def on_submit(self, interaction: discord.Interaction):
         if not limiter.check(interaction.user.id, 'open', 10):
             return await interaction.response.send_message(
-                embed=discord.Embed(description='slow down a bit', color=0xFEE75C),
+                embed=discord.Embed(title='⏳  Slow Down', description='You are opening tickets too fast. Please wait before trying again.', color=0xFEE75C),
                 ephemeral=True
             )
         try:
@@ -855,7 +758,7 @@ class RewardModal(Modal, title='Claim a Reward'):
             logger.error(f'pre_open_checks: {ex}')
             try:
                 await interaction.followup.send(
-                    embed=discord.Embed(description='something went wrong, try again later', color=0xED4245),
+                    embed=discord.Embed(description='Something went wrong. Please try again or contact a staff member.', color=0xED4245),
                     ephemeral=True
                 )
             except Exception:
@@ -870,20 +773,16 @@ class RewardModal(Modal, title='Claim a Reward'):
             category = guild.get_channel(cfg['ticket_category_id'])
             staff_r  = guild.get_role(ROLES['staff'])
 
-            gw_host_r = guild.get_role(GW_HOST_ROLE)
-
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(read_messages=False),
                 guild.me:           discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True, manage_messages=True),
                 user:               discord.PermissionOverwrite(read_messages=True, send_messages=True),
             }
             if staff_r:
-                overwrites[staff_r]   = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-            if gw_host_r:
-                overwrites[gw_host_r] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                overwrites[staff_r] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
             channel = await category.create_text_channel(name=ch_name, overwrites=overwrites)
-            data    = {'type': self.rtype, 'what': self.what.value, 'proof': self.proof.value}
+            data    = {'type': self.rtype, 'what': self.what.value}
 
             async with db.pool.acquire() as c:
                 await c.execute(
@@ -892,18 +791,15 @@ class RewardModal(Modal, title='Claim a Reward'):
                 )
             daily_stats[guild.id]['tickets'] += 1
             fields = [
-                ('**Claiming**', self.what.value,  False),
-                ('**Proof**',    self.proof.value, False),
+                ('**Claiming**', self.what.value, False),
             ]
             e    = make_ticket_embed(user, 'reward', tid, fields)
             ping = user.mention
             if staff_r:
                 ping += f' {staff_r.mention}'
-            if gw_host_r:
-                ping += f' {gw_host_r.mention}'
             await channel.send(content=ping, embed=e, view=ControlView())
             await interaction.followup.send(
-                embed=discord.Embed(description=f'✅ Your ticket has been opened — {channel.mention}', color=0x57F287),
+                embed=discord.Embed(title='✅  Ticket Opened', description=f'Your ticket has been created — {channel.mention}', color=0x57F287),
                 ephemeral=True
             )
         except Exception as ex:
@@ -923,11 +819,10 @@ class RewardSelect(Select):
             placeholder='what kind of reward?',
             custom_id='reward_type_select',
             options=[
-                discord.SelectOption(label='Giveaway Prize',  value='giveaway', emoji='🎉', description='u won a giveaway'),
-                discord.SelectOption(label='Invite Reward',   value='invite',   emoji='📨', description='invite reward'),
-                discord.SelectOption(label='Event Reward',    value='event',    emoji='🏆', description='event reward'),
-                discord.SelectOption(label='Bonus Reward',    value='bonus',    emoji='💰', description='bonus or special reward'),
-                discord.SelectOption(label='Other',           value='other',    emoji='🎁', description='anything else reward related'),
+                discord.SelectOption(label='Invite Reward',   value='invite',   emoji='📨', description='Claim an invite milestone reward'),
+                discord.SelectOption(label='Event Reward',    value='event',    emoji='🏆', description='Claim an event prize or reward'),
+                discord.SelectOption(label='Bonus Reward',    value='bonus',    emoji='💰', description='Claim a bonus or special reward'),
+                discord.SelectOption(label='Other',           value='other',    emoji='🎁', description='Anything else reward related'),
             ]
         )
 
@@ -943,13 +838,13 @@ class TicketPanel(View):
     async def support(self, interaction: discord.Interaction, _):
         if not limiter.interaction_check(interaction.user.id):
             return await interaction.response.send_message(
-                embed=discord.Embed(description='⏳ you\'re clicking too fast — slow down', color=0xFEE75C),
+                embed=discord.Embed(title='⏳  Slow Down', description='You are clicking too fast. Please slow down.', color=0xFEE75C),
                 ephemeral=True
             )
         if not limiter.check(interaction.user.id, 'open', 10):
             rem = limiter.remaining(interaction.user.id, 'open', 10)
             return await interaction.response.send_message(
-                embed=discord.Embed(description=f'you opened a ticket recently — wait **{int(rem)}s**', color=0xFEE75C),
+                embed=discord.Embed(title='⏳  Slow Down', description=f'You opened a ticket recently. Please wait **{int(rem)}s** before opening another.', color=0xFEE75C),
                 ephemeral=True
             )
         try:
@@ -963,7 +858,7 @@ class TicketPanel(View):
             logger.error(f'pre_open_checks: {ex}')
             try:
                 await interaction.followup.send(
-                    embed=discord.Embed(description='something went wrong, try again', color=0xED4245),
+                    embed=discord.Embed(description='Something went wrong. Please try again or contact a staff member.', color=0xED4245),
                     ephemeral=True
                 )
             except Exception:
@@ -999,7 +894,7 @@ class TicketPanel(View):
                 ping += f' {staff_r.mention}'
             await channel.send(content=ping, embed=e, view=ControlView())
             await interaction.followup.send(
-                embed=discord.Embed(description=f'✅ Your ticket has been opened — {channel.mention}', color=0x57F287),
+                embed=discord.Embed(title='✅  Ticket Opened', description=f'Your ticket has been created — {channel.mention}', color=0x57F287),
                 ephemeral=True
             )
         except Exception as ex:
@@ -1022,7 +917,7 @@ class TicketPanel(View):
         v = View(timeout=300)
         v.add_item(TierSelect())
         await interaction.response.send_message(
-            embed=discord.Embed(description='Select a tier based on the value of your trade.', color=TIER_COLOR['support']),
+            embed=discord.Embed(title='⚖️  Select Your Tier', description='Pick the tier that best matches the value of your trade.', color=TIER_COLOR['support']),
             view=v, ephemeral=True
         )
 
@@ -1036,7 +931,7 @@ class TicketPanel(View):
         v = View(timeout=300)
         v.add_item(RewardSelect())
         await interaction.response.send_message(
-            embed=discord.Embed(description='What type of reward are you claiming?', color=TIER_COLOR['reward']),
+            embed=discord.Embed(title='🎁  Claim a Reward', description='Select the type of reward you are claiming.', color=TIER_COLOR['reward']),
             view=v, ephemeral=True
         )
 
@@ -1056,22 +951,11 @@ class ControlView(View):
             return await interaction.response.send_message(
                 embed=discord.Embed(title='⏳  Slow Down', description=f'Please wait **{rem:.1f}s** before trying again.', color=0xFEE75C), ephemeral=True
             )
-        gw_host_r = interaction.guild.get_role(GW_HOST_ROLE)
-        is_gw_host = gw_host_r is not None and gw_host_r in interaction.user.roles
-        if not _is_staff(interaction.user) and not is_gw_host:
+        if not _is_staff(interaction.user):
             return await interaction.response.send_message(
                 embed=discord.Embed(description='You need a staff role to claim tickets.', color=0xED4245),
                 ephemeral=True
             )
-        # GW hosters can only claim reward tickets
-        async with db.pool.acquire() as _chk:
-            _t = await _chk.fetchrow('SELECT ticket_type, tier FROM tickets WHERE channel_id=$1', interaction.channel.id)
-        if is_gw_host and not _is_staff(interaction.user):
-            if not _t or _t.get('tier') != 'reward':
-                return await interaction.response.send_message(
-                    embed=discord.Embed(description='As a Giveaway Host, you can only claim **Reward** tickets.', color=0xED4245),
-                    ephemeral=True
-                )
         async with db.pool.acquire() as c:
             ticket = await c.fetchrow(
                 'SELECT * FROM tickets WHERE channel_id = $1', interaction.channel.id
@@ -1102,7 +986,6 @@ class ControlView(View):
         await claim_lock(interaction.channel, interaction.user, creator, ticket['ticket_type'])
         e = discord.Embed(color=0x57F287)
         e.title       = '✅  Ticket Claimed'
-        e.title       = '✅  Ticket Claimed'
         e.description = (
             f'**{interaction.user.mention}** is now handling this ticket.\n\n'
             f'> `$add @user` — grant someone access\n'
@@ -1128,7 +1011,7 @@ class ControlView(View):
         if not limiter.check(interaction.user.id, 'unclaim', 2):
             rem = limiter.remaining(interaction.user.id, 'unclaim', 2)
             return await interaction.response.send_message(
-                embed=discord.Embed(description=f'slow down — wait **{rem:.1f}s**', color=0xFEE75C), ephemeral=True
+                embed=discord.Embed(title='⏳  Slow Down', description=f'Please wait **{rem:.1f}s** before trying again.', color=0xFEE75C), ephemeral=True
             )
         async with db.pool.acquire() as c:
             ticket = await c.fetchrow(
@@ -1136,18 +1019,18 @@ class ControlView(View):
             )
             if not ticket:
                 return await interaction.response.send_message(
-                    embed=discord.Embed(description='no ticket here', color=0xED4245), ephemeral=True
+                    embed=discord.Embed(description='No ticket found in this channel.', color=0xED4245), ephemeral=True
                 )
             if not ticket['claimed_by']:
                 return await interaction.response.send_message(
-                    embed=discord.Embed(description="nobody's claimed this yet", color=0xED4245), ephemeral=True
+                    embed=discord.Embed(description="This ticket hasn't been claimed yet.", color=0xED4245), ephemeral=True
                 )
             is_mm      = ticket['ticket_type'] == 'middleman'
             is_claimer = ticket['claimed_by'] == interaction.user.id
             is_admin   = interaction.user.guild_permissions.administrator
             if is_mm and not is_claimer:
                 return await interaction.response.send_message(
-                    embed=discord.Embed(description='only the mm who claimed this can unclaim it', color=0xED4245),
+                    embed=discord.Embed(description='Only the staff member who claimed this ticket can unclaim it.', color=0xED4245),
                     ephemeral=True
                 )
             if not is_mm and not is_claimer and not is_admin:
@@ -1163,9 +1046,53 @@ class ControlView(View):
         await claim_unlock(interaction.channel, old, ticket['ticket_type'])
         e = discord.Embed(color=0x5865F2)
         e.title       = '↩️  Ticket Unclaimed'
-        e.title       = '↩️  Ticket Unclaimed'
         e.description = f'**{interaction.user.mention}** has unclaimed this ticket. It is now available for any eligible staff member to pick up.'
         await interaction.response.send_message(embed=e)
+
+    @discord.ui.button(label='Close', style=ButtonStyle.red, emoji='🔒', custom_id='btn_close')
+    async def close_btn(self, interaction: discord.Interaction, _):
+        if not _is_staff(interaction.user) and not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                embed=discord.Embed(description='You need a staff role to close tickets.', color=0xED4245),
+                ephemeral=True
+            )
+        async with db.pool.acquire() as c:
+            ticket = await c.fetchrow('SELECT * FROM tickets WHERE channel_id=$1', interaction.channel.id)
+        if not ticket:
+            return await interaction.response.send_message(
+                embed=discord.Embed(description='No ticket found in this channel.', color=0xED4245),
+                ephemeral=True
+            )
+        if not ticket.get('claimed_by'):
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title='🔒  Cannot Close Yet',
+                    description='This ticket must be **claimed** before it can be closed.\n\nPress **Claim** first, then close.',
+                    color=0xFEE75C
+                ),
+                ephemeral=True
+            )
+        is_claimer = ticket['claimed_by'] == interaction.user.id
+        is_admin   = interaction.user.guild_permissions.administrator
+        is_mm      = ticket['ticket_type'] == 'middleman'
+        if is_mm and not is_claimer and not is_admin:
+            return await interaction.response.send_message(
+                embed=discord.Embed(description='Only the staff member who claimed this ticket can close it.', color=0xED4245),
+                ephemeral=True
+            )
+        # Show confirm prompt
+        e = discord.Embed(color=0xFEE75C)
+        e.title = '🔒  Close Ticket'
+        e.description = (
+            f'Are you sure you want to close ticket **#{ticket["ticket_id"]}**?\n\n'
+            f'The channel will be permanently deleted and a full transcript will be saved to the log channel.'
+        )
+        # Re-use CloseConfirm but we need a fake ctx-like object — use a simple inline approach
+        class _FakeCtx:
+            author = interaction.user
+        view = CloseConfirm(_FakeCtx(), ticket)
+        await interaction.response.send_message(embed=e, view=view, ephemeral=False)
+        view.msg = await interaction.original_response()
 
 
 class CloseConfirm(View):
@@ -1196,7 +1123,6 @@ class CloseConfirm(View):
                 )
         e = discord.Embed(color=0xED4245)
         e.title       = '🔒  Closing Ticket'
-        e.title       = '🔒  Closing Ticket'
         e.description = f'Closing ticket **#{self.ticket["ticket_id"]}** — saving the transcript. This channel will be deleted shortly.'
         await interaction.message.edit(embed=e, view=None)
         await save_transcript(interaction.channel, self.ticket, interaction.user)
@@ -1213,14 +1139,12 @@ class CloseConfirm(View):
         await interaction.response.defer()
         e = discord.Embed(color=0x5865F2)
         e.title       = '↩️  Cancelled'
-        e.title       = '↩️  Cancelled'
         e.description = 'The close request was cancelled. This ticket remains open.'
         await interaction.message.edit(embed=e, view=None)
 
     async def on_timeout(self):
         try:
             e = discord.Embed(color=0x5865F2)
-            e.title       = '⏰  Request Expired'
             e.title       = '⏰  Request Expired'
             e.description = 'The close request timed out. Run `$close` again if you still want to close this ticket.'
             await self.msg.edit(embed=e, view=None)
@@ -1234,7 +1158,7 @@ class CloseConfirm(View):
 @staff_only()
 async def close_cmd(ctx):
     if not ctx.channel.name.startswith('ticket-'):
-        return await ctx.reply(embed=discord.Embed(description="this isn't a ticket channel.", color=0xED4245))
+        return await ctx.reply(embed=discord.Embed(description='This command can only be used inside a ticket channel.', color=0xED4245))
     if not limiter.check(ctx.author.id, 'close', 3):
         rem = limiter.remaining(ctx.author.id, 'close', 3)
         return await ctx.reply(embed=discord.Embed(description=f'Please wait **{rem:.1f}s** before trying to close again.', color=0xFEE75C))
@@ -1256,7 +1180,6 @@ async def close_cmd(ctx):
     if is_mm and not ticket.get('claimed_by') and not is_staff:
         return await ctx.reply(embed=discord.Embed(description='You need a staff role to close tickets.', color=0xED4245))
     e = discord.Embed(color=0xFEE75C)
-    e.title = '🔒  Close Ticket'
     e.title = '🔒  Close Ticket'
     e.description = (
         f'Are you sure you want to close ticket **#{ticket["ticket_id"]}**?\n\n'
@@ -1296,7 +1219,6 @@ async def claim_cmd(ctx):
     await claim_lock(ctx.channel, ctx.author, creator, ticket['ticket_type'])
     e = discord.Embed(color=0x57F287)
     e.title       = '✅  Ticket Claimed'
-    e.title       = '✅  Ticket Claimed'
     e.description = (
         f'**{ctx.author.mention}** is now handling this ticket.\n\n'
         f'> `$add @user` — grant someone access\n'
@@ -1335,7 +1257,6 @@ async def unclaim_cmd(ctx):
     await claim_unlock(ctx.channel, old, ticket['ticket_type'])
     e = discord.Embed(color=0x5865F2)
     e.title       = '↩️  Ticket Unclaimed'
-    e.title       = '↩️  Ticket Unclaimed'
     e.description = f'**{ctx.author.mention}** has unclaimed this ticket. It is now available for any eligible staff member to pick up.'
     await ctx.send(embed=e)
 
@@ -1358,7 +1279,6 @@ async def add_cmd(ctx, member: discord.Member = None):
     await ctx.channel.set_permissions(member, read_messages=True, send_messages=True)
     e = discord.Embed(color=0x57F287)
     e.title       = '✅  Member Added'
-    e.title       = '✅  Member Added'
     e.description = f'{member.mention} has been granted access to this ticket.'
     e.set_footer(text=f'Added by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -1378,7 +1298,6 @@ async def remove_cmd(ctx, member: discord.Member = None):
     await ctx.channel.set_permissions(member, overwrite=None)
     e = discord.Embed(color=0xED4245)
     e.title       = '🚪  Member Removed'
-    e.title       = '🚪  Member Removed'
     e.description = f'{member.mention}\'s access to this ticket has been revoked.'
     e.set_footer(text=f'Removed by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -1394,12 +1313,11 @@ async def rename_cmd(ctx, *, new_name: str = None):
     async with db.pool.acquire() as c:
         ticket = await c.fetchrow('SELECT * FROM tickets WHERE channel_id=$1', ctx.channel.id)
     if not ticket or not await _can_manage(ctx, ticket):
-        return await ctx.reply(embed=discord.Embed(description="you can't rename this", color=0xED4245))
+        return await ctx.reply(embed=discord.Embed(description="You don't have permission to rename this ticket.", color=0xED4245))
     safe     = re.sub(r'[^a-z0-9\-]', '-', new_name.lower())
     old_name = ctx.channel.name
     await ctx.channel.edit(name=f'ticket-{safe}')
     e = discord.Embed(color=0x57F287)
-    e.title       = '✏️  Channel Renamed'
     e.title       = '✏️  Channel Renamed'
     e.description = f'`{old_name}` → `ticket-{safe}`'
     e.set_footer(text=f'Renamed by {ctx.author.display_name}')
@@ -1433,7 +1351,6 @@ async def transfer_cmd(ctx, member: discord.Member = None):
         await c.execute("UPDATE tickets SET claimed_by=$1, status='claimed' WHERE ticket_id=$2", member.id, ticket['ticket_id'])
     e = discord.Embed(color=0x57F287)
     e.title       = '🔄  Ticket Transferred'
-    e.title       = '🔄  Ticket Transferred'
     e.description = f'This ticket has been transferred from **{ctx.author.mention}** to **{member.mention}**.'
     e.set_footer(text=f'Transferred by {ctx.author.display_name}')
     await ctx.send(embed=e)
@@ -1444,7 +1361,7 @@ async def transfer_cmd(ctx, member: discord.Member = None):
 @staff_only()
 async def locktic_cmd(ctx):
     if not ctx.channel.name.startswith('ticket-'):
-        return await ctx.reply(embed=discord.Embed(description="this isn't a ticket channel.", color=0xED4245))
+        return await ctx.reply(embed=discord.Embed(description='This command can only be used inside a ticket channel.', color=0xED4245))
     async with db.pool.acquire() as c:
         ticket = await c.fetchrow('SELECT * FROM tickets WHERE channel_id=$1', ctx.channel.id)
     if not ticket:
@@ -1459,13 +1376,7 @@ async def locktic_cmd(ctx):
             ow = ctx.channel.overwrites_for(r)
             ow.send_messages = False
             await ctx.channel.set_permissions(r, overwrite=ow)
-    gw_r = ctx.guild.get_role(GW_HOST_ROLE)
-    if gw_r:
-        ow = ctx.channel.overwrites_for(gw_r)
-        ow.send_messages = False
-        await ctx.channel.set_permissions(gw_r, overwrite=ow)
     e = discord.Embed(color=0xED4245)
-    e.title       = '🔒  Ticket Locked'
     e.title       = '🔒  Ticket Locked'
     e.description = 'This ticket has been locked. Only the claimer and the ticket creator can send messages here.\n\nRun `$unlocktic` to restore access.'
     e.set_footer(text=f'Locked by {ctx.author.display_name}')
@@ -1476,7 +1387,7 @@ async def locktic_cmd(ctx):
 @staff_only()
 async def unlocktic_cmd(ctx):
     if not ctx.channel.name.startswith('ticket-'):
-        return await ctx.reply(embed=discord.Embed(description="this isn't a ticket channel.", color=0xED4245))
+        return await ctx.reply(embed=discord.Embed(description='This command can only be used inside a ticket channel.', color=0xED4245))
     async with db.pool.acquire() as c:
         ticket = await c.fetchrow('SELECT * FROM tickets WHERE channel_id=$1', ctx.channel.id)
     if not ticket:
@@ -1491,13 +1402,7 @@ async def unlocktic_cmd(ctx):
             ow = ctx.channel.overwrites_for(r)
             ow.send_messages = True
             await ctx.channel.set_permissions(r, overwrite=ow)
-    gw_r = ctx.guild.get_role(GW_HOST_ROLE)
-    if gw_r:
-        ow = ctx.channel.overwrites_for(gw_r)
-        ow.send_messages = True
-        await ctx.channel.set_permissions(gw_r, overwrite=ow)
     e = discord.Embed(color=0x57F287)
-    e.title       = '🔓  Ticket Unlocked'
     e.title       = '🔓  Ticket Unlocked'
     e.description = 'This ticket has been unlocked. Everyone with access can now send messages again.'
     e.set_footer(text=f'Unlocked by {ctx.author.display_name}')
@@ -1517,7 +1422,7 @@ async def proof_cmd(ctx):
     if not proof_ch:
         return await ctx.reply(embed=discord.Embed(description='The proof channel could not be found. Please contact a server administrator.', color=0xED4245))
     opener = ctx.guild.get_member(ticket['user_id'])
-    e = discord.Embed(title='✅  trade completed', color=0x57F287)
+    e = discord.Embed(title='✅  Trade Completed', color=0x57F287)
     e.add_field(name='⚖️  Middleman', value=ctx.author.mention,                              inline=True)
     e.add_field(name='📊  Tier',      value=TIER_LABEL.get(ticket.get('tier'), 'Unknown'),     inline=True)
     e.add_field(name='👤  Client',    value=opener.mention if opener else 'Unknown',           inline=True)
@@ -1535,7 +1440,7 @@ async def proof_cmd(ctx):
     await proof_ch.send(embed=e)
     e2 = discord.Embed(color=0x57F287)
     e2.title       = '✅  Proof Posted'
-    e2.description   = f'The trade proof has been successfully posted to {proof_ch.mention}.'
+    e2.description = f'The trade proof has been successfully posted to {proof_ch.mention}.'
     e2.set_footer(text=f'Posted by {ctx.author.display_name}')
     await ctx.reply(embed=e2)
 
@@ -1743,7 +1648,7 @@ async def setup_cmd(ctx):
         '    the right staff member will claim your ticket.\n'
         '\n'
         '🎁  **Claim Reward**\n'
-        '╚► Won a giveaway or hit an invite milestone?\n'
+        '╚► Hit an invite milestone or have a reward to claim?\n'
         '    Have your proof ready and we will get it sorted.'
     )
     e.set_footer(text='Tap a button below to get started  •  Trial\'s Cross Trade Middleman Service')
@@ -1820,7 +1725,7 @@ async def config_cmd(ctx):
 
     e.add_field(name='⏱️  Uptime',   value=fmt_uptime(datetime.now(timezone.utc) - BOT_START), inline=True)
     e.add_field(name='📡  Latency',  value=f'{round(bot.latency * 1000)}ms', inline=True)
-    footer = 'finish setup with $setcategory and $setlogs' if not cfg else f'requested by {ctx.author.display_name}'
+    footer = 'Finish setup with $setcategory and $setlogs.' if not cfg else f'Requested by {ctx.author.display_name}'
     e.set_footer(text=footer)
     await ctx.reply(embed=e)
 
@@ -1928,16 +1833,19 @@ async def invites_cmd(ctx, member: discord.Member = None):
     real     = joins - leaves - fake - rejoins
     word     = 'invite' if real == 1 else 'invites'
 
-    e = discord.Embed(color=0x5865F2)
-    e.set_author(name=f'{member.display_name}', icon_url=member.display_avatar.url)
-    e.description = f'## 📨 {real} real {word}'
-    e.add_field(name='📥  Total Joins',   value=str(joins),    inline=True)
-    e.add_field(name='🚪  Left',          value=str(leaves),   inline=True)
-    e.add_field(name='🤖  Fake',          value=str(fake),     inline=True)
-    e.add_field(name='🔄  Rejoins',       value=str(rejoins),  inline=True)
-    e.add_field(name='✅  Verified',      value=str(verified), inline=True)
+    e = discord.Embed(title='📨  Invite Log', color=0x5865F2)
+    e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
     e.set_thumbnail(url=member.display_avatar.url)
-    e.set_footer(text=f'requested by {ctx.author.display_name}')
+    e.description = (
+        f'**{member.mention} has {real} real {"invite" if real == 1 else "invites"}**\n'
+        f'\n'
+        f'> 📥  Joins       **{joins}**\n'
+        f'> 🚪  Left         **{leaves}**\n'
+        f'> 🔄  Rejoins   **{rejoins}**\n'
+        f'> 🤖  Fake        **{fake}**\n'
+        f'> ✅  Verified   **{verified}**'
+    )
+    e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
@@ -2033,19 +1941,59 @@ async def whoinvited_cmd(ctx, member: discord.Member = None):
     member = member or ctx.author
     async with db.pool.acquire() as c:
         row = await c.fetchrow(
-            'SELECT inviter_id FROM member_invites WHERE guild_id=$1 AND user_id=$2',
+            "SELECT mi.inviter_id, mi.joined_at, mi.is_rejoin "
+            "FROM member_invites mi "
+            "WHERE mi.guild_id=$1 AND mi.user_id=$2",
             ctx.guild.id, member.id
         )
     if not row or not row['inviter_id']:
-        return await ctx.reply(embed=discord.Embed(description=f'No invite data found for {member.mention}', color=0x5865F2))
-    inviter = ctx.guild.get_member(row['inviter_id'])
+        e = discord.Embed(color=0xED4245)
+        e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.description = f'No invite data found for {member.mention}.'
+        e.set_footer(text=f'Requested by {ctx.author.display_name}')
+        return await ctx.reply(embed=e)
+
+    inviter    = ctx.guild.get_member(row['inviter_id'])
+    joined_at  = row['joined_at']
+    is_rejoin  = row.get('is_rejoin', False)
+    verified_r = ctx.guild.get_role(VERIFIED_ROLE)
+    is_verified = verified_r and verified_r in member.roles
+
+    now_utc     = datetime.now(timezone.utc)
+    acc_created = member.created_at if member.created_at.tzinfo else member.created_at.replace(tzinfo=timezone.utc)
+    acc_age     = (now_utc - acc_created).days
+    join_str    = joined_at.strftime('%b %d, %Y') if joined_at else 'Unknown'
+
+    if is_rejoin:
+        status = '🔄  Rejoin'
+    elif acc_age < 3:
+        status = '❌  Fake — account under 3 days old'
+    elif is_verified:
+        status = '✅  Verified'
+    else:
+        status = '👤  Unverified'
+
     inviter_str = inviter.mention if inviter else f'`{row["inviter_id"]}`'
+
+    async with db.pool.acquire() as c:
+        inv_stats = await c.fetchrow(
+            'SELECT joins, leaves, fake, rejoins FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
+            ctx.guild.id, row['inviter_id']
+        )
+    real_invites = 0
+    if inv_stats:
+        real_invites = inv_stats['joins'] - inv_stats['leaves'] - inv_stats['fake'] - inv_stats['rejoins']
+
     e = discord.Embed(title='📨  Invite Lookup', color=0x5865F2)
     e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
     e.set_thumbnail(url=member.display_avatar.url)
     e.description = (
-        f'**{member.mention}** was invited by\n'
-        f'> {inviter_str}'
+        f'**{member.mention}** was invited by {inviter_str}\n'
+        f'\n'
+        f'> 📅  Joined          **{join_str}**\n'
+        f'> 🏷️  Status           {status}\n'
+        f'> 📨  Inviter has   **{real_invites}** real invite{"s" if real_invites != 1 else ""}'
     )
     e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
@@ -2063,7 +2011,7 @@ async def lb_cmd(ctx):
 @bot.command(name='invited')
 async def invited_cmd(ctx, member: discord.Member = None):
     if not member:
-        return await ctx.reply(embed=discord.Embed(description='usage: `$invited @user`', color=0x5865F2))
+        return await ctx.reply(embed=discord.Embed(title='👥  Invited', description='**Usage:** `$invited @user`\nShows everyone a user has invited with their current status.', color=0x5865F2))
     async with db.pool.acquire() as c:
         rows = await c.fetch(
             '''SELECT mi.user_id, mi.joined_at, mi.is_rejoin
@@ -2075,9 +2023,9 @@ async def invited_cmd(ctx, member: discord.Member = None):
     if not rows:
         e = discord.Embed(color=0x5865F2)
         e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
-        e.description = f'**{member.display_name}** has not invited anyone yet.'
         e.set_thumbnail(url=member.display_avatar.url)
-        e.set_footer(text=f'requested by {ctx.author.display_name}')
+        e.description = f'**{member.mention} has not invited anyone yet.**'
+        e.set_footer(text=f'Requested by {ctx.author.display_name}')
         return await ctx.reply(embed=e)
 
     verified_role = ctx.guild.get_role(VERIFIED_ROLE)
@@ -2097,35 +2045,42 @@ async def invited_cmd(ctx, member: discord.Member = None):
             tag = '✅'
         else:
             counts['unverified'] += 1
-            tag = '👤'
+            tag = '❌'
 
         name = invited_member.mention if invited_member else f'`{r["user_id"]}`'
         lines.append(f'{tag} {name}')
 
     total = len(rows)
-    e = discord.Embed(color=0x5865F2)
+    real  = total - counts['left'] - counts['rejoin'] - counts['unverified']
+
+    # Split list into two columns
+    half     = (len(lines) + 1) // 2
+    col_left  = lines[:half]
+    col_right = lines[half:]
+
+    e = discord.Embed(title=f'👥  Invited by {member.display_name}', color=0x5865F2)
     e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
-    e.description = f'## 📨 {total} total invite{"s" if total != 1 else ""}'
-    e.add_field(name='✅ verified',   value=str(counts['verified']),   inline=True)
-    e.add_field(name='👤 unverified', value=str(counts['unverified']), inline=True)
-    e.add_field(name='🚪 left',       value=str(counts['left']),       inline=True)
-    e.add_field(name='🔄 rejoins',    value=str(counts['rejoin']),     inline=True)
-    members_text = (
-        '\n'.join(lines[:20])
-        + (f'\n*... and {total - 20} more*' if total > 20 else '')
-    )
-    if members_text:
-        e.add_field(name='👥 members', value=members_text, inline=False)
-    # placeholder so thumbnail doesn't break layout
-    e.description = e.description  # keep description
     e.set_thumbnail(url=member.display_avatar.url)
-    e.set_footer(text=f'requested by {ctx.author.display_name}')
+    e.description = (
+        f'{member.mention} has invited **{total}** member{"s" if total != 1 else ""}\n'
+        f'\n'
+        f'✅ {counts["verified"]}  ·  🚪 {counts["left"]}  ·  🔄 {counts["rejoin"]}  ·  ❌ {counts["unverified"]}'
+    )
+    if col_left:
+        e.add_field(name='​', value='\n'.join(col_left[:15]),  inline=True)
+    if col_right:
+        e.add_field(name='​', value='\n'.join(col_right[:15]), inline=True)
+    if total > 30:
+        e.set_footer(text=f'Showing 30 of {total}  ·  Requested by {ctx.author.display_name}')
+    else:
+        e.set_footer(text=f'Requested by {ctx.author.display_name}')
     await ctx.reply(embed=e)
 
 
 @bot.command(name='clearinvites')
-@owner_only()
 async def clearinvites_cmd(ctx, target: str = None):
+    if ctx.author.id != OWNER_ID and not ctx.author.guild_permissions.administrator:
+        return await ctx.reply(embed=discord.Embed(description='You need to be the server owner or an administrator to use this command.', color=0xED4245))
     if not target:
         e = discord.Embed(title='🗑️  Clear Invites', color=0x5865F2)
         e.description = (
@@ -2143,7 +2098,7 @@ async def clearinvites_cmd(ctx, target: str = None):
         e = discord.Embed(color=0x57F287)
         e.title       = '✅  All Invite Stats Cleared'
         e.description = f'All invite stats across **{ctx.guild.name}** have been reset.'
-        e.set_footer(text=f'cleared by {ctx.author.display_name}')
+        e.set_footer(text=f'Cleared by {ctx.author.display_name}')
         return await ctx.reply(embed=e)
 
     try:
@@ -2583,74 +2538,99 @@ async def activemm_cmd(ctx):
 # ================================================================== help command
 
 HELP_PAGES = [
+    # ─────────────────────────── PAGE 1 — TICKETS
     {
-        'title':  '🎫  Ticket Commands',
-        'color':  0x5865F2,
+        'title': '🎫  Tickets',
+        'color': 0x5865F2,
         'fields': [
             {
-                'name':  '╔══════ 📥  Opening a Ticket',
+                'name':  '╔══ 📥  Opening a Ticket',
                 'value': (
-                    '╚► Use the panel below to open a ticket.\n'
+                    '╚► Use the ticket panel to open a ticket.\n'
                     '┃\n'
-                    '┣ 🔵  **Support** — General help & questions\n'
-                    '┣ 🟣  **Middleman** — Secure trades (pick your tier)\n'
-                    '┗ 🟡  **Reward** — Claim giveaways, events & invite rewards'
+                    '┣ 🔵  **Support** — Questions, reports & appeals\n'
+                    '┣ 🟣  **Middleman** — Secure trades, pick your tier\n'
+                    '┗ 🟡  **Reward** — Claim giveaways & invite rewards'
                 ),
             },
             {
-                'name':  '╔══════ 🔧  Managing Your Ticket',
+                'name':  '╔══ 🔧  Managing a Ticket',
                 'value': (
-                    '╚► Commands available once a ticket is open.\n'
+                    '╚► Staff commands inside a ticket.\n'
                     '┃\n'
-                    '┣ `$claim` ——————— Claim the ticket\n'
+                    '┣ `$claim` ————————— Claim the ticket as yours\n'
                     '┣ `$unclaim` —————— Drop your claim\n'
-                    '┣ `$close` ——————— Close & save transcript\n'
+                    '┣ `$close` ————————— Close & save a transcript\n'
                     '┣ `$add @user` ———— Grant someone access\n'
-                    '┣ `$remove @user` —— Revoke someone\'s access\n'
+                    '┣ `$remove @user` —— Revoke access\n'
                     '┣ `$rename <name>` — Rename the channel\n'
-                    '┗ `$transfer @user` — Hand off to another staff member'
+                    '┗ `$transfer @user` — Hand off your claim'
                 ),
             },
             {
-                'name':  '╔══════ 🔒  Ticket Lock',
+                'name':  '╔══ 🔒  Ticket Lock',
                 'value': (
-                    '╚► Restrict who can talk in a claimed ticket.\n'
+                    '╚► Restrict who can talk while a ticket is claimed.\n'
                     '┃\n'
                     '┣ `$locktic` ——— Lock to claimer + creator only\n'
-                    '┗ `$unlocktic` ——— Restore access for everyone'
+                    '┗ `$unlocktic` — Restore access for all'
                 ),
             },
             {
-                'name':  '╔══════ 📊  Stats & Ratings',
+                'name':  '╔══ 📊  Stats & Proof',
                 'value': (
-                    '╚► Track your performance.\n'
+                    '╚► Track performance & post proof.\n'
                     '┃\n'
-                    '┣ `$ticketstats` — Your claimed / closed / rating stats  `$ts`\n'
-                    '┣ `$rateme` ———— Request a rating from the ticket creator\n'
-                    '┗ `$proof` ———— Post completed trade proof to the proof channel'
+                    '┣ `$ticketstats` — Your claimed / closed / rating  `$ts`\n'
+                    '┣ `$rateme` ———— Send rating request to ticket creator\n'
+                    '┗ `$proof` ———— Post completed trade proof'
                 ),
             },
         ],
     },
+    # ─────────────────────────── PAGE 2 — STAFF TOOLS
     {
-        'title':  '🛡️  Staff Tools',
-        'color':  0xED4245,
+        'title': '🛡️  Staff Tools',
+        'color': 0xED4245,
         'fields': [
             {
-                'name':  '╔══════ ⚙️  Channel Permissions',
+                'name':  '╔══ 🔨  Moderation',
                 'value': (
-                    '╚► Control what members can do in channels.\n'
+                    '╚► Control access and behavior.\n'
+                    '┃\n'
+                    '┣ `$blacklist @user [reason]` — Block from opening tickets\n'
+                    '┣ `$unblacklist @user` ———— Remove from blacklist\n'
+                    '┣ `$blacklists` ———————— View all blacklisted users\n'
+                    '┣ `$slowmode <secs>` ———— Set slowmode, `0` = disable  `$slow`\n'
+                    '┣ `$lock` ————————————— Disable ticket creation\n'
+                    '┣ `$unlock` ——————————— Re-enable ticket creation\n'
+                    '┣ `$say #channel <msg>` — Send a message as the bot\n'
+                    '┣ `$botstats` ——————— Today\'s server activity  `$bstats`\n'
+                    '┗ `$activity` ———————— Top 10 active members today'
+                ),
+            },
+            {
+                'name':  '╔══ ⚙️  Channel Permissions',
+                'value': (
+                    '╚► Edit what roles/users can do in channels.\n'
                     '┃\n'
                     '┣ `$channelperm #ch @target <perm> <on/off>`\n'
-                    '┃   └ Set a perm for one channel\n'
+                    '┃   └ Set a perm in one specific channel\n'
                     '┗ `$channelpermall @target <perm> <on/off>`\n'
                     '    └ Set a perm across every channel at once'
                 ),
             },
+        ],
+    },
+    # ─────────────────────────── PAGE 3 — PERMISSIONS LIST
+    {
+        'title': '📋  Permission Names',
+        'color': 0xED4245,
+        'fields': [
             {
-                'name':  '╔══════ 💬  Text Permissions',
+                'name':  '╔══ 💬  Text Permissions',
                 'value': (
-                    '╚► All aliases accepted.\n'
+                    '╚► Pass any alias as `<perm>`.\n'
                     '┃\n'
                     '┣ `send` / `send_messages`\n'
                     '┣ `read` / `view` / `view_channel` / `read_messages`\n'
@@ -2670,9 +2650,9 @@ HELP_PAGES = [
                 ),
             },
             {
-                'name':  '╔══════ 🎙️  Voice Permissions',
+                'name':  '╔══ 🎙️  Voice Permissions',
                 'value': (
-                    '╚► All aliases accepted.\n'
+                    '╚► Voice channel perms.\n'
                     '┃\n'
                     '┣ `voice` / `connect`\n'
                     '┣ `speak` / `talk`\n'
@@ -2689,9 +2669,9 @@ HELP_PAGES = [
                 ),
             },
             {
-                'name':  '╔══════ 🔧  Manage Permissions',
+                'name':  '╔══ 🔧  Manage Permissions',
                 'value': (
-                    '╚► All aliases accepted.\n'
+                    '╚► Admin-level channel perms.\n'
                     '┃\n'
                     '┣ `pin` / `manage` / `manage_messages`\n'
                     '┣ `slow` / `manage_channels`\n'
@@ -2699,136 +2679,97 @@ HELP_PAGES = [
                     '┗ `manage_perms` / `manage_permissions`'
                 ),
             },
-            {
-                'name':  '╔══════ 🔨  Moderation & Control',
-                'value': (
-                    '╚► Owner & staff moderation tools.\n'
-                    '┃\n'
-                    '┣ `$blacklist @user [reason]` — Block from opening tickets\n'
-                    '┣ `$unblacklist @user` ———— Remove from blacklist\n'
-                    '┣ `$blacklists` ———————— View all blacklisted users\n'
-                    '┣ `$slowmode <secs>` ———— Set slowmode (`0` = disable)  `$slow`\n'
-                    '┣ `$lock` / `$unlock` ——————— Toggle ticket creation on/off\n'
-                    '┣ `$say #channel <msg>` —— Send a message as the bot\n'
-                    '┣ `$botstats` ——————— Today\'s activity snapshot  `$bstats`\n'
-                    '┗ `$activity` ———————— Top 10 most active members today'
-                ),
-            },
         ],
     },
+    # ─────────────────────────── PAGE 4 — UTILITY
     {
-        'title':  '⚙️  Server Setup',
-        'color':  0xFEE75C,
+        'title': '🔧  Utility',
+        'color': 0x57F287,
         'fields': [
             {
-                'name':  '╔══════ 📁  Configuration  —  Owner Only',
+                'name':  '╔══ 🔍  Message Tools',
                 'value': (
-                    '╚► Run these once to configure the bot.\n'
+                    '╚► Recover deleted or edited messages.\n'
                     '┃\n'
-                    '┣ `$setup` ——————————— Post the ticket panel\n'
-                    '┣ `$setupverify` ————————— Post the verification panel\n'
-                    '┣ `$setcategory #category` —— Set where ticket channels are created\n'
-                    '┣ `$setlogs #channel` ————— Set the transcript & audit log channel\n'
-                    '┗ `$config` ——————————— View full bot config, channels & latency'
-                ),
-            },
-        ],
-    },
-    {
-        'title':  '🔧  Utility',
-        'color':  0x57F287,
-        'fields': [
-            {
-                'name':  '╔══════ 🔍  Message Tools',
-                'value': (
-                    '╚► Recover recently deleted or edited messages.\n'
-                    '┃\n'
-                    '┣ `$snipe` ——— Last deleted message in this channel  `$sn`\n'
-                    '┗ `$esnipe` ——— Last edited message (before & after)  `$es`'
+                    '┣ `$snipe` — Last deleted message in this channel  `$sn`\n'
+                    '┗ `$esnipe` — Last edited message, before & after  `$es`'
                 ),
             },
             {
-                'name':  '╔══════ 📊  Server Info',
+                'name':  '╔══ 👤  Member Info',
                 'value': (
                     '╚► Look up members and server details.\n'
                     '┃\n'
-                    '┣ `$userinfo [@user]` — Full profile: roles, age, status  `$ui` `$whois`\n'
-                    '┣ `$serverinfo` ——— Server overview: members, boosts, channels  `$si`\n'
-                    '┣ `$membercount` ——— Total, human, bot & online count  `$mc`\n'
+                    '┣ `$userinfo [@user]` — Roles, age, join date, status  `$ui` `$whois`\n'
+                    '┣ `$serverinfo` ——— Server stats overview  `$si`\n'
+                    '┣ `$membercount` ——— Total, human, bot & online  `$mc`\n'
                     '┣ `$newest` ————— 5 most recently joined members  `$nw`\n'
                     '┣ `$oldest` ————— 5 longest standing members  `$ol`\n'
                     '┣ `$botlist` ———— All bots in the server  `$bl`\n'
-                    '┗ `$activemm` ———— Online middlemen sorted by tier  `$amm`'
+                    '┗ `$activemm` ———— Online middlemen by tier  `$amm`'
                 ),
             },
             {
-                'name':  '╔══════ 🤖  Bot Info',
+                'name':  '╔══ 🤖  Bot',
                 'value': (
-                    '╚► Check bot status.\n'
+                    '╚► Bot status.\n'
                     '┃\n'
-                    '┣ `$ping` ——— Current bot latency\n'
-                    '┗ `$uptime` ——— How long the bot has been online'
+                    '┣ `$ping` ——— Bot latency\n'
+                    '┗ `$uptime` — How long the bot has been online'
                 ),
             },
         ],
     },
+    # ─────────────────────────── PAGE 5 — INVITE TRACKING
     {
-        'title':  '📨  Invite Tracking',
-        'color':  0x5865F2,
+        'title': '📨  Invite Tracking',
+        'color': 0x5865F2,
         'fields': [
             {
-                'name':  '╔══════ 📈  How Tracking Works',
+                'name':  '╔══ 📈  How It Works',
                 'value': (
-                    '╚► Every join is recorded automatically.\n'
+                    '╚► Every join is tracked automatically.\n'
                     '┃\n'
-                    '┣ ✅  **Real** — Joined, stayed & verified\n'
-                    '┣ ❌  **Left** — Joined but has since left\n'
-                    '┣ 👥  **Fake** — Account too new or suspicious\n'
-                    '┗ 🔁  **Rejoin** — Rejoined after a previous leave'
+                    '┣ 📥  **Invites** — Total people who joined via your link\n'
+                    '┣ 🚪  **Left** — Joined but has since left\n'
+                    '┣ 🔄  **Rejoins** — Left then rejoined within 7 days\n'
+                    '┣ 🤖  **Fake** — Account under 3 days old at join\n'
+                    '┗ ✅  **Verified** — Completed verification\n'
+                    '\n'
+                    '> **Real count** = Invites − Left − Rejoins − Fake'
                 ),
             },
             {
-                'name':  '╔══════ 📋  Commands',
+                'name':  '╔══ 📋  Commands',
                 'value': (
                     '╚► View and manage invite stats.\n'
                     '┃\n'
-                    '┣ `$invites [@user]` ——————— View invite breakdown\n'
-                    '┣ `$invited @user` ————————— See everyone that user invited\n'
-                    '┣ `$whoinvited [@user]` ———— Who invited a specific member\n'
-                    '┣ `$lb` ————————————————— Live top-10 leaderboard  `$lbi` `$invitelb`\n'
-                    '┣ `$createcustomlink` ————— Personal invite link that tracks your stats  `$ccl`\n'
-                    '┣ `$clearinvites all` ————— Reset all server invite stats  *(owner)*\n'
-                    '┗ `$clearinvites @user` ——— Reset one user\'s stats  *(owner)*'
+                    '┣ `$invites [@user]` ——— Your or someone\'s invite stats\n'
+                    '┣ `$invited @user` ————— Everyone that user has invited\n'
+                    '┣ `$whoinvited [@user]` — Who invited a specific member\n'
+                    '┣ `$lb` ————————————— Live top-10 leaderboard  `$lbi` `$invitelb`\n'
+                    '┣ `$createcustomlink` —— Personal invite link  `$ccl`\n'
+                    '┣ `$clearinvites all` —— Reset all invite stats  *(owner)*\n'
+                    '┗ `$clearinvites @user` — Reset one user\'s stats  *(owner)*'
                 ),
             },
         ],
     },
+    # ─────────────────────────── PAGE 6 — SETUP
     {
-        'title':  '🎉  Giveaways',
-        'color':  0xEB459E,
+        'title': '⚙️  Server Setup',
+        'color': 0xFEE75C,
         'fields': [
             {
-                'name':  '╔══════ 📋  Slash Commands',
+                'name':  '╔══ 📁  Configuration  —  Owner Only',
                 'value': (
-                    '╚► All giveaway commands use `/giveaway`.\n'
+                    '╚► Run once to configure the bot.\n'
                     '┃\n'
-                    '┣ `/giveaway create` ———— Start a new giveaway\n'
-                    '┃   └ Options: `duration` `winners` `prize` `channel` `host` `image` `required_role`\n'
-                    '┣ `/giveaway end` —————— End a giveaway early\n'
-                    '┣ `/giveaway reroll` ———— Reroll a new winner\n'
-                    '┣ `/giveaway addentries` —— Add bonus entries to a role\n'
-                    '┗ `/giveaway removeentries` — Remove a bonus entry role'
-                ),
-            },
-            {
-                'name':  '╔══════ 📌  How It Works',
-                'value': (
-                    '╚► Everything you need to know.\n'
-                    '┃\n'
-                    '┣ ⏱️  **Duration** — `10d` `2h` `30m` `90s` or combined: `1d12h`\n'
-                    '┣ 🎟️  **Entries** — 1 base per user, bonus roles stack on top\n'
-                    '┣ 🔒  **Required Role** — Blocks entry if member doesn\'t have it\n'
-                    '┗ 🎲  **Fairness** — Winners chosen via a cryptographically seeded 7-pass shuffle'
+                    '┣ `$setup` ——————————————— Post the ticket panel\n'
+                    '┣ `$setupverify` ————————— Post the verification panel\n'
+                    '┣ `$setcategory #category` — Set where tickets are created\n'
+                    '┣ `$setlogs #channel` ———— Set transcript & audit log channel\n'
+                    '┗ `$config` ——————————————— View full config, channels & latency'
                 ),
             },
         ],
@@ -2839,7 +2780,7 @@ def make_help_embed(page: int) -> discord.Embed:
     e   = discord.Embed(title=p['title'], color=p.get('color', 0x5865F2))
     for field in p.get('fields', []):
         e.add_field(name=field['name'], value=field['value'], inline=False)
-    e.set_footer(text=f"Trial's Cross Trade Middleman Service  ·  page {page + 1} of {len(HELP_PAGES)}  ·  prefix: $")
+    e.set_footer(text=f"Trial's Cross Trade Middleman Service  ·  Page {page + 1} of {len(HELP_PAGES)}  ·  Prefix: $")
     return e
 
 
@@ -2934,7 +2875,6 @@ async def botstats_cmd(ctx):
     stats        = daily_stats.get(ctx.guild.id, {})
     cmds         = stats.get('commands', 0)
     tickets      = stats.get('tickets', 0)
-    gws          = stats.get('giveaways', 0)
     verifs       = stats.get('verifications', 0)
     active_users = len(message_counts.get(ctx.guild.id, {}))
     total_msgs   = sum(message_counts.get(ctx.guild.id, {}).values())
@@ -2947,9 +2887,6 @@ async def botstats_cmd(ctx):
         total_tickets = await c.fetchval(
             'SELECT COUNT(*) FROM tickets WHERE guild_id=$1', ctx.guild.id
         )
-        active_gws    = await c.fetchval(
-            'SELECT COUNT(*) FROM giveaways WHERE guild_id=$1 AND ended=FALSE', ctx.guild.id
-        )
         total_verifs  = await c.fetchval(
             'SELECT COUNT(*) FROM verifications WHERE guild_id=$1', ctx.guild.id
         )
@@ -2960,7 +2897,6 @@ async def botstats_cmd(ctx):
         value=(
             f'📟  Commands Used : **{cmds}**\n'
             f'🎫  Tickets Opened : **{tickets}**\n'
-            f'🎉  Giveaways Started : **{gws}**\n'
             f'✅  Verifications : **{verifs}**\n'
             f'💬  Messages Sent : **{total_msgs}**\n'
             f'👥  Active Members : **{active_users}**'
@@ -2972,7 +2908,6 @@ async def botstats_cmd(ctx):
         value=(
             f'🎫  Total Tickets : **{total_tickets}**\n'
             f'🔓  Open Tickets : **{open_tickets}**\n'
-            f'🎉  Active Giveaways : **{active_gws}**\n'
             f'✅  Total Verifications : **{total_verifs}**'
         ),
         inline=True
@@ -3039,7 +2974,7 @@ class VerifyView(View):
         captchas[user.id] = code
         e = discord.Embed(title='🔐  verify', color=0x5865F2)
         e.description = f"here's your code — type it in the verify channel\n\n# `{code}`"
-        e.set_footer(text='not case sensitive')
+        e.set_footer(text="Trial's Cross Trade Middleman Service  ·  Do not share this code")
         await interaction.response.send_message(embed=e, ephemeral=True)
 
 
@@ -3113,520 +3048,25 @@ def make_welcome_card(avatar_bytes: bytes, username: str, server_name: str, memb
 @bot.command(name='setupverify')
 @owner_only()
 async def setupverify_cmd(ctx):
-    e = discord.Embed(color=0x57F287)
+    e = discord.Embed(color=0x5865F2)
     e.set_author(name="Trial's Cross Trade Middleman Service", icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
     e.description = (
-        "## ✅ verification\n\n"
-        "welcome to **Trial's Cross Trade Middleman Service**\n\n"
-        "tap the button below and type the code you receive to get in\n"
-        "takes less than 10 seconds"
+        "## 🔐  Server Verification\n\n"
+        "**To access the server, you must complete the verification process.**\n\n"
+        "1️⃣  Click the **Verify** button below.\n"
+        "2️⃣  The bot will send you a unique verification code as an image.\n"
+        "3️⃣  Type that exact code in the verification channel to confirm you are a real user.\n\n"
+        "This system helps protect the server from bots, spam, and alt accounts.\n\n"
+        "Once your code is confirmed, you will automatically receive full access to the server.\n"
+        "-# If you experience any issues, please contact a staff member for assistance."
     )
-    e.set_footer(text="tap the button below to verify")
+    e.set_footer(text="Trial's Cross Trade Middleman Service  ·  Click the button below to get started")
     await ctx.send(embed=e, view=VerifyView())
     try:
         await ctx.message.delete()
     except Exception:
         pass
 
-
-# ================================================================== giveaway system
-
-def parse_duration(s: str) -> int:
-    s     = s.strip().lower()
-    units = {'d': 86400, 'h': 3600, 'm': 60, 's': 1}
-    for unit, mult in units.items():
-        if s.endswith(unit):
-            try:
-                return int(s[:-1]) * mult
-            except ValueError:
-                return 0
-    try:
-        return int(s) * 60
-    except ValueError:
-        return 0
-
-
-def format_end_date(dt: datetime) -> str:
-    return dt.strftime('%m/%d/%Y')
-
-
-def format_time_left(dt: datetime) -> str:
-    now  = datetime.now(timezone.utc)
-    diff = dt - now
-    if diff.total_seconds() <= 0:
-        return 'ended'
-    d = diff.days
-    h, rem = divmod(diff.seconds, 3600)
-    m, _   = divmod(rem, 60)
-    if d > 0: return f'in {d}d {h}h'
-    if h > 0: return f'in {h}h {m}m'
-    return f'in {m}m'
-
-
-async def get_entry_count(member: discord.Member, bonus_roles: list) -> int:
-    best = 0
-    for role_id, entries in bonus_roles:
-        if member.get_role(role_id):
-            best = max(best, entries)
-    return 1 + best
-
-
-async def build_giveaway_embed(prize, winners, host, ends_at, required_role, image, bonus_roles, guild=None):
-    e = discord.Embed(title=f'🎉  {prize}', color=0x2ECC71)
-    e.description = (
-        f'press 🎉 to enter!\n\n'
-        f'🏆 **winners** — {winners}\n'
-        f'👑 **hosted by** — {host.mention}\n'
-        f'⏳ **ending** — {format_time_left(ends_at)}'
-    )
-    if bonus_roles and guild:
-        lines = []
-        for role_id, entries in bonus_roles:
-            r = guild.get_role(role_id)
-            if r:
-                lines.append(f'{r.mention} — **{entries}** bonus entr{"y" if entries == 1 else "ies"}')
-        if lines:
-            e.add_field(name='🎫 bonus entries', value='\n'.join(lines), inline=False)
-    if required_role:
-        e.add_field(name='🔒 required role', value=required_role.mention, inline=False)
-    if image:
-        e.set_image(url=image)
-    e.set_footer(text='press the button below to enter')
-    return e
-
-
-class GiveawayEntryView(View):
-    def __init__(self, giveaway_id: int):
-        super().__init__(timeout=None)
-        self.giveaway_id       = giveaway_id
-        self.enter_btn.custom_id = f'gw_enter:{giveaway_id}'
-        self.parts_btn.custom_id = f'gw_parts:{giveaway_id}'
-
-    @discord.ui.button(label='0', emoji='🎉', style=ButtonStyle.primary, custom_id='gw_enter:0')
-    async def enter_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        gw_id = int(button.custom_id.split(':')[1])
-        async with db.pool.acquire() as c:
-            gw = await c.fetchrow('SELECT * FROM giveaways WHERE id=$1', gw_id)
-            if not gw or gw['ended']:
-                return await interaction.response.send_message(
-                    embed=discord.Embed(description='giveaway already ended', color=0xED4245),
-                    ephemeral=True
-                )
-            if gw['required_role_id']:
-                if not interaction.user.get_role(gw['required_role_id']):
-                    role = interaction.guild.get_role(gw['required_role_id'])
-                    return await interaction.response.send_message(
-                        embed=discord.Embed(
-                            description=f'you need {role.mention if role else "the required role"} to enter',
-                            color=0xED4245
-                        ),
-                        ephemeral=True
-                    )
-            existing = await c.fetchrow(
-                'SELECT 1 FROM giveaway_entries WHERE giveaway_id=$1 AND user_id=$2',
-                gw_id, interaction.user.id
-            )
-            if existing:
-                await c.execute(
-                    'DELETE FROM giveaway_entries WHERE giveaway_id=$1 AND user_id=$2',
-                    gw_id, interaction.user.id
-                )
-                count = await c.fetchval(
-                    'SELECT COUNT(DISTINCT user_id) FROM giveaway_entries WHERE giveaway_id=$1', gw_id
-                )
-                button.label = str(count)
-                await interaction.response.edit_message(view=self)
-                return await interaction.followup.send(
-                    embed=discord.Embed(description='left the giveaway', color=0xFEE75C),
-                    ephemeral=True
-                )
-            bonus_rows  = await c.fetch(
-                'SELECT role_id, entries FROM giveaway_bonus_roles WHERE guild_id=$1', interaction.guild_id
-            )
-            bonus_roles = [(r['role_id'], r['entries']) for r in bonus_rows]
-            total       = await get_entry_count(interaction.user, bonus_roles)
-            for _ in range(total):
-                await c.execute(
-                    'INSERT INTO giveaway_entries (giveaway_id, user_id) VALUES ($1,$2)',
-                    gw_id, interaction.user.id
-                )
-            count = await c.fetchval(
-                'SELECT COUNT(DISTINCT user_id) FROM giveaway_entries WHERE giveaway_id=$1', gw_id
-            )
-        button.label = str(count)
-        await interaction.response.edit_message(view=self)
-        msg = f'you entered with **{total}** entr{"y" if total == 1 else "ies"}!'
-        await interaction.followup.send(
-            embed=discord.Embed(description=msg, color=0x57F287), ephemeral=True
-        )
-
-    @discord.ui.button(label='Participants', emoji='👥', style=ButtonStyle.secondary, custom_id='gw_parts:0')
-    async def parts_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        gw_id = int(button.custom_id.split(':')[1])
-        async with db.pool.acquire() as c:
-            rows = await c.fetch(
-                '''SELECT user_id, COUNT(*) AS entry_count
-                   FROM giveaway_entries
-                   WHERE giveaway_id=$1
-                   GROUP BY user_id
-                   ORDER BY entry_count DESC, user_id''',
-                gw_id
-            )
-        if not rows:
-            return await interaction.response.send_message(
-                embed=discord.Embed(description='nobody entered yet', color=0x5865F2), ephemeral=True
-            )
-        lines = []
-        for r in rows:
-            n = r['entry_count']
-            entry_str = f'{n} entr{"y" if n == 1 else "ies"}'
-            lines.append(f'<@{r["user_id"]}> — **{entry_str}**')
-
-        total    = len(lines)
-        per_page = 15
-        pages    = [lines[i:i + per_page] for i in range(0, len(lines), per_page)]
-
-        def make_page(idx):
-            e = discord.Embed(
-                title=f'Participants — {total}  •  Page {idx+1}/{len(pages)}',
-                color=0x5865F2
-            )
-            e.description = '\n'.join(pages[idx])
-            return e
-
-        class PartsView(View):
-            def __init__(self):
-                super().__init__(timeout=60)
-                self.page    = 0
-                self.message = None
-                self._sync()
-
-            def _sync(self):
-                self.prev.disabled = self.page == 0
-                self.nxt.disabled  = self.page == len(pages) - 1
-
-            @discord.ui.button(label='Prev', style=ButtonStyle.gray)
-            async def prev(self, inter: discord.Interaction, _):
-                if inter.user.id != interaction.user.id:
-                    return await inter.response.send_message('not your menu', ephemeral=True)
-                self.page -= 1
-                self._sync()
-                await inter.response.edit_message(embed=make_page(self.page), view=self)
-
-            @discord.ui.button(label='Next', style=ButtonStyle.gray)
-            async def nxt(self, inter: discord.Interaction, _):
-                if inter.user.id != interaction.user.id:
-                    return await inter.response.send_message('not your menu', ephemeral=True)
-                self.page += 1
-                self._sync()
-                await inter.response.edit_message(embed=make_page(self.page), view=self)
-
-            async def on_timeout(self):
-                try:
-                    for item in self.children:
-                        item.disabled = True
-                    await self.message.edit(view=self)
-                except Exception:
-                    pass
-
-        if len(pages) == 1:
-            return await interaction.response.send_message(embed=make_page(0), ephemeral=True)
-
-        pv          = PartsView()
-        pv.message  = await interaction.response.send_message(embed=make_page(0), view=pv, ephemeral=True)
-
-
-async def end_giveaway(giveaway_id: int, guild: discord.Guild):
-    async with db.pool.acquire() as c:
-        gw = await c.fetchrow('SELECT * FROM giveaways WHERE id=$1', giveaway_id)
-        if not gw or gw['ended']:
-            return
-        await c.execute('UPDATE giveaways SET ended=TRUE WHERE id=$1', giveaway_id)
-        entries = await c.fetch('SELECT user_id FROM giveaway_entries WHERE giveaway_id=$1', giveaway_id)
-
-    channel = guild.get_channel(gw['channel_id'])
-    if not channel:
-        return
-    try:
-        msg = await channel.fetch_message(gw['message_id'])
-    except Exception:
-        return
-
-    if not entries:
-        e = discord.Embed(title=f'🎉 {gw["prize"]}', description='giveaway ended with no entries', color=0xED4245)
-        await msg.edit(embed=e, view=None)
-        await channel.send(embed=discord.Embed(description=f'**{gw["prize"]}** ended with no entries', color=0xED4245))
-        return
-
-    pool         = [r['user_id'] for r in entries]
-    unique_users = list(set(pool))
-    num_win      = min(gw['winners_count'], len(unique_users))
-
-    async with db.pool.acquire() as c:
-        last_row = await c.fetchrow(
-            'SELECT winner_ids FROM giveaway_last_winners WHERE guild_id=$1 AND prize=$2',
-            gw['guild_id'], gw['prize']
-        )
-    last_winners = set(last_row['winner_ids']) if last_row else set()
-    eligible     = [u for u in unique_users if u not in last_winners]
-    if len(eligible) < num_win:
-        eligible = unique_users
-
-    weighted = [u for u in pool if u in set(eligible)]
-    if not weighted:
-        weighted = list(pool)
-
-    winners  = _pick_winners(weighted, eligible, num_win)
-
-    async with db.pool.acquire() as c:
-        await c.execute(
-            '''INSERT INTO giveaway_last_winners (guild_id, prize, winner_ids) VALUES ($1,$2,$3)
-               ON CONFLICT (guild_id, prize) DO UPDATE SET winner_ids=$3''',
-            gw['guild_id'], gw['prize'], winners
-        )
-
-    mentions = ' '.join(f'<@{w}>' for w in winners)
-    e = discord.Embed(title=f'🎉 {gw["prize"]}', color=0xF1C40F)
-    e.description = f'**Winner{"s" if num_win > 1 else ""}** — {mentions}'
-    e.set_footer(text='Giveaway ended')
-    dead_view = GiveawayEntryView(giveaway_id)
-    for item in dead_view.children:
-        item.disabled = True
-    await msg.edit(embed=e, view=dead_view)
-    await channel.send(
-        content=mentions,
-        embed=discord.Embed(description=f'🎉 {mentions} won **{gw["prize"]}**!!', color=0xF1C40F)
-    )
-
-
-async def schedule_giveaway(giveaway_id: int, ends_at: datetime, guild: discord.Guild):
-    delay = (ends_at - datetime.now(timezone.utc)).total_seconds()
-    if delay > 0:
-        await asyncio.sleep(delay)
-    await end_giveaway(giveaway_id, guild)
-
-
-# ================================================================== giveaway slash commands
-
-giveaway_group = app_commands.Group(name='giveaway', description='Giveaway commands')
-
-
-@giveaway_group.command(name='create', description='Create a giveaway')
-@app_commands.describe(
-    duration='How long the giveaway lasts (e.g. 10d, 2h, 30m)',
-    winners='Number of winners',
-    prize='What is being given away',
-    channel='Channel to post in (default: current)',
-    host='Who is hosting (default: you)',
-    image='Image URL to attach',
-    required_role='Role required to enter',
-)
-async def giveaway_create(
-    interaction: discord.Interaction,
-    duration: str,
-    winners: int,
-    prize: str,
-    channel: discord.TextChannel = None,
-    host: discord.Member         = None,
-    image: str                   = None,
-    required_role: discord.Role  = None,
-):
-    has_gw_role = interaction.user.get_role(GW_HOST_ROLE) is not None
-    if not has_gw_role and not interaction.user.guild_permissions.manage_guild:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='you need the **Giveaway Host** role to make giveaways', color=0xED4245),
-            ephemeral=True
-        )
-    secs = parse_duration(duration)
-    if not secs:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='invalid duration — try something like `10d`, `2h`, `30m`', color=0xED4245),
-            ephemeral=True
-        )
-    if winners < 1:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='gotta have at least 1 winner', color=0xED4245),
-            ephemeral=True
-        )
-    channel = channel or interaction.channel
-    host    = host    or interaction.user
-    ends_at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=secs)
-
-    async with db.pool.acquire() as c:
-        bonus_rows  = await c.fetch('SELECT role_id, entries FROM giveaway_bonus_roles WHERE guild_id=$1', interaction.guild_id)
-        bonus_roles = [(r['role_id'], r['entries']) for r in bonus_rows]
-
-    embed = await build_giveaway_embed(prize, winners, host, ends_at, required_role, image, bonus_roles, guild=interaction.guild)
-    await interaction.response.send_message(
-        embed=discord.Embed(description='posting...', color=0x5865F2), ephemeral=True
-    )
-    temp_view = GiveawayEntryView(0)
-    msg       = await channel.send(embed=embed, view=temp_view)
-
-    daily_stats[interaction.guild_id]['giveaways'] += 1
-    async with db.pool.acquire() as c:
-        gw_id = await c.fetchval(
-            '''INSERT INTO giveaways
-               (guild_id, channel_id, message_id, prize, winners_count, host_id, required_role_id, image_url, ends_at, ended)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,FALSE)
-               RETURNING id''',
-            interaction.guild_id, channel.id, msg.id, prize, winners, host.id,
-            required_role.id if required_role else None, image, ends_at
-        )
-
-    real_view = GiveawayEntryView(gw_id)
-    await msg.edit(view=real_view)
-    await interaction.edit_original_response(
-        embed=discord.Embed(description=f'giveaway posted in {channel.mention}', color=0x57F287)
-    )
-    asyncio.create_task(schedule_giveaway(gw_id, ends_at, interaction.guild))
-
-
-@giveaway_group.command(name='end', description='End a giveaway early')
-@app_commands.describe(message_id='The message ID of the giveaway to end')
-async def giveaway_end(interaction: discord.Interaction, message_id: str):
-    has_perm = (
-        interaction.user.guild_permissions.manage_guild
-        or interaction.user.get_role(GW_HOST_ROLE) is not None
-        or _is_staff(interaction.user)
-    )
-    if not has_perm:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='staff only', color=0xED4245), ephemeral=True
-        )
-    try:
-        mid = int(message_id)
-    except ValueError:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='invalid message ID', color=0xED4245), ephemeral=True
-        )
-    async with db.pool.acquire() as c:
-        gw = await c.fetchrow('SELECT * FROM giveaways WHERE message_id=$1 AND guild_id=$2', mid, interaction.guild_id)
-    if not gw:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='giveaway not found', color=0xED4245), ephemeral=True
-        )
-    if gw['ended']:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='already ended', color=0xED4245), ephemeral=True
-        )
-    await interaction.response.send_message(
-        embed=discord.Embed(description='ending it...', color=0xFEE75C), ephemeral=True
-    )
-    await end_giveaway(gw['id'], interaction.guild)
-    await interaction.edit_original_response(
-        embed=discord.Embed(description='giveaway ended', color=0x57F287)
-    )
-
-
-@giveaway_group.command(name='reroll', description='Reroll a giveaway winner')
-@app_commands.describe(message_id='The message ID of the giveaway to reroll')
-async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
-    has_perm = (
-        interaction.user.guild_permissions.manage_guild
-        or interaction.user.get_role(GW_HOST_ROLE) is not None
-        or _is_staff(interaction.user)
-    )
-    if not has_perm:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='staff only', color=0xED4245), ephemeral=True
-        )
-    try:
-        mid = int(message_id)
-    except ValueError:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='invalid message ID', color=0xED4245), ephemeral=True
-        )
-    async with db.pool.acquire() as c:
-        gw = await c.fetchrow('SELECT * FROM giveaways WHERE message_id=$1 AND guild_id=$2', mid, interaction.guild_id)
-        if not gw:
-            return await interaction.response.send_message(
-                embed=discord.Embed(description='giveaway not found', color=0xED4245), ephemeral=True
-            )
-        if not gw['ended']:
-            return await interaction.response.send_message(
-                embed=discord.Embed(description="⚠️ that giveaway hasn't ended yet — end it first with `/giveaway end`", color=0xFEE75C), ephemeral=True
-            )
-        entries = await c.fetch('SELECT user_id FROM giveaway_entries WHERE giveaway_id=$1', gw['id'])
-    if not entries:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='no entries to reroll from', color=0xED4245), ephemeral=True
-        )
-    pool         = [r['user_id'] for r in entries]
-    unique_users = list(set(pool))
-    num_win      = min(gw['winners_count'], len(unique_users))
-    winners      = _pick_winners(pool, unique_users, num_win)
-    mentions     = ' '.join(f'<@{w}>' for w in winners)
-    channel      = interaction.guild.get_channel(gw['channel_id'])
-    if channel:
-        await channel.send(
-            content=mentions,
-            embed=discord.Embed(
-                description=f'reroll!! {mentions} won **{gw["prize"]}**!!',
-                color=0xF1C40F
-            )
-        )
-    await interaction.response.send_message(
-        embed=discord.Embed(description=f'rerolled — new winner: {mentions}', color=0x57F287),
-        ephemeral=True
-    )
-
-
-@giveaway_group.command(name='addentries', description='Add a bonus entry role')
-@app_commands.describe(role='The role to give bonus entries', entries='Number of bonus entries')
-async def giveaway_addentries(interaction: discord.Interaction, role: discord.Role, entries: int):
-    has_perm = (
-        interaction.user.guild_permissions.manage_guild
-        or interaction.user.get_role(GW_HOST_ROLE) is not None
-    )
-    if not has_perm:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='you need Manage Server for that', color=0xED4245), ephemeral=True
-        )
-    if entries < 1:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='gotta be at least 1 entry', color=0xED4245), ephemeral=True
-        )
-    async with db.pool.acquire() as c:
-        await c.execute(
-            '''INSERT INTO giveaway_bonus_roles (guild_id, role_id, entries) VALUES ($1,$2,$3)
-               ON CONFLICT (guild_id, role_id) DO UPDATE SET entries=$3''',
-            interaction.guild_id, role.id, entries
-        )
-    await interaction.response.send_message(
-        embed=discord.Embed(
-            description=f'{role.mention} now gives **{entries}** bonus entr{"y" if entries == 1 else "ies"}',
-            color=0x57F287
-        ),
-        ephemeral=True
-    )
-
-
-@giveaway_group.command(name='removeentries', description='Remove a bonus entry role')
-@app_commands.describe(role='The role to remove from bonus entries')
-async def giveaway_removeentries(interaction: discord.Interaction, role: discord.Role):
-    has_perm = (
-        interaction.user.guild_permissions.manage_guild
-        or interaction.user.get_role(GW_HOST_ROLE) is not None
-    )
-    if not has_perm:
-        return await interaction.response.send_message(
-            embed=discord.Embed(description='Manage Server required', color=0xED4245), ephemeral=True
-        )
-    async with db.pool.acquire() as c:
-        result = await c.execute(
-            'DELETE FROM giveaway_bonus_roles WHERE guild_id=$1 AND role_id=$2',
-            interaction.guild_id, role.id
-        )
-    if result == 'DELETE 0':
-        return await interaction.response.send_message(
-            embed=discord.Embed(description=f"{role.mention} wasn't in the bonus list", color=0xFEE75C),
-            ephemeral=True
-        )
-    await interaction.response.send_message(
-        embed=discord.Embed(description=f'{role.mention} removed from bonus entries', color=0x57F287),
-        ephemeral=True
-    )
 
 
 # ================================================================== events
@@ -3697,7 +3137,6 @@ async def on_ready():
 
     if not _bot_ready:
         _bot_ready = True
-        bot.tree.add_command(giveaway_group)
         await bot.tree.sync()
         logger.info('slash commands synced')
 
@@ -3711,22 +3150,7 @@ async def on_ready():
         bot.add_view(ControlView())
         bot.add_view(VerifyView())
 
-        try:
-            async with db.pool.acquire() as c:
-                active_gws = await c.fetch('SELECT id, guild_id, ends_at FROM giveaways WHERE ended=FALSE')
-            for gw in active_gws:
-                bot.add_view(GiveawayEntryView(gw['id']))
-                guild = bot.get_guild(gw['guild_id'])
-                if guild:
-                    if gw['ends_at'] <= datetime.now(timezone.utc):
-                        asyncio.create_task(end_giveaway(gw['id'], guild))
-                    else:
-                        asyncio.create_task(schedule_giveaway(gw['id'], gw['ends_at'], guild))
-            logger.info(f'rescheduled {len(active_gws)} active giveaway(s)')
-        except Exception as ex:
-            logger.error(f'giveaway restore failed: {ex}')
-
-    # cache invites on every ready (reconnect refreshes cache)
+        # cache invites on every ready (reconnect refreshes cache)
     for guild in bot.guilds:
         try:
             invites = await guild.invites()
@@ -3769,7 +3193,8 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.CommandOnCooldown):
         try:
             await ctx.reply(embed=discord.Embed(
-                description=f'⏳ slow down — wait **{error.retry_after:.1f}s**',
+                description=f'You are sending commands too fast. Please wait **{error.retry_after:.1f}s** before trying again.',
+                title='⏳  Slow Down',
                 color=0xFEE75C
             ), delete_after=int(error.retry_after) + 1)
         except Exception:
@@ -3907,7 +3332,7 @@ async def on_member_join(member: discord.Member):
             now_utc        = datetime.now(timezone.utc)
             acc_created    = member.created_at if member.created_at.tzinfo else member.created_at.replace(tzinfo=timezone.utc)
             acc_age        = now_utc - acc_created
-            is_new_account = acc_age.days < 5
+            is_new_account = acc_age.days < 3
 
             async with db.pool.acquire() as c:
                 left_row = await c.fetchrow(
@@ -3970,7 +3395,7 @@ async def on_member_join(member: discord.Member):
             if is_rejoin:
                 note = ' (rejoin)'
             elif is_fake:
-                note = ' (fake — account too new)' if is_new_account else ' (fake)'
+                note = ' (fake — account under 3 days old)'
             else:
                 note = ''
 
