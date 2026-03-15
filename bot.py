@@ -1820,18 +1820,39 @@ async def blacklists_cmd(ctx):
 @bot.command(name='invites')
 async def invites_cmd(ctx, member: discord.Member = None):
     member = member or ctx.author
+    verified_role = ctx.guild.get_role(VERIFIED_ROLE)
+
+    # Pull every member this person has invited
     async with db.pool.acquire() as c:
-        row = await c.fetchrow(
-            'SELECT * FROM invite_stats WHERE guild_id=$1 AND inviter_id=$2',
+        rows = await c.fetch(
+            "SELECT user_id, is_rejoin FROM member_invites WHERE guild_id=$1 AND inviter_id=$2",
             ctx.guild.id, member.id
         )
-    joins    = row['joins']    if row else 0
-    leaves   = row['leaves']   if row else 0
-    fake     = row['fake']     if row else 0
-    rejoins  = row['rejoins']  if row else 0
-    verified = row['verified'] if row else 0
-    real     = joins - leaves - fake - rejoins
-    word     = 'invite' if real == 1 else 'invites'
+
+    joins    = len(rows)
+    left     = 0
+    rejoins  = 0
+    fake     = 0
+    verified = 0
+
+    now_utc = datetime.now(timezone.utc)
+
+    for r in rows:
+        invited_m = ctx.guild.get_member(r['user_id'])
+        is_rejoin = r.get('is_rejoin', False)
+
+        if is_rejoin:
+            rejoins += 1
+        elif invited_m is None:
+            left += 1
+        else:
+            acc = invited_m.created_at if invited_m.created_at.tzinfo else invited_m.created_at.replace(tzinfo=timezone.utc)
+            if (now_utc - acc).days < 3:
+                fake += 1
+            elif verified_role and verified_role in invited_m.roles:
+                verified += 1
+
+    real = joins - left - rejoins - fake
 
     e = discord.Embed(title='📨  Invite Log', color=0x5865F2)
     e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
@@ -1840,7 +1861,7 @@ async def invites_cmd(ctx, member: discord.Member = None):
         f'**{member.mention} has {real} real {"invite" if real == 1 else "invites"}**\n'
         f'\n'
         f'> 📥  Joins       **{joins}**\n'
-        f'> 🚪  Left         **{leaves}**\n'
+        f'> 🚪  Left         **{left}**\n'
         f'> 🔄  Rejoins   **{rejoins}**\n'
         f'> 🤖  Fake        **{fake}**\n'
         f'> ✅  Verified   **{verified}**'
